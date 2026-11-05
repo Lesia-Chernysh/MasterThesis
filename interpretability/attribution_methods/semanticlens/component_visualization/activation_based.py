@@ -365,6 +365,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
         )
         with self.actmax_cache.hook_context(self.model):
             for i, (images, _) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Collecting ActMax"):
+                print("fixed forward run")
                 _ = self.model(images.to(self.device)).cpu()
 
         if self._cache_root:
