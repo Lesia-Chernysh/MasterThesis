@@ -732,10 +732,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             print(f"Cache root exists: {self._cache_root}")
             with self.actmax_cache.hook_context(self.model):
                 for i, (images, _) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Collecting ActMax"):
-                    try:
-                      _ = self.model(images.to(self.device)).cpu()
-                    except AttributeError:
-                      _ = self.model(images.to(self.device))
+                    _ = self.model(images.to(self.device))
 
         if self._cache_root:
             self.actmax_cache.store(self.storage_dir)
