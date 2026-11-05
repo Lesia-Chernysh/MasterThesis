@@ -39,7 +39,10 @@ class ImagenetMini(Dataset):
         if self.idx2labels is not None:
             # self.dataset.samples[idx]] is a list of length = idx. idx is defined when I slice over the ds
             path, _ = self.dataset.samples[idx]
-            label = self.idx2labels[path.split("\\")[-2]]
+            try:
+                label = self.idx2labels[path.split("\\")[-2]]
+            except IndexError:
+                label = self.idx2labels[path.split("/")[-2]]
             return image, label
         else:
             return image, None

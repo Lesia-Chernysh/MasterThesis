@@ -11,7 +11,7 @@ def create_resnet50(device="cpu"):
 
     model = resnet50(weights=weights)
 
-    model.name = "resnet50"
+    model.name = "resnet_50"
     model.classes = weights.meta["categories"].copy()
 
     return model.eval().to(device)
