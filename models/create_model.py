@@ -30,8 +30,9 @@ def create_vgg16(device="cpu"):
 
 def create_vit(device="cpu"):
     model = AutoModelForImageClassification.from_pretrained("timm/vit_small_patch16_224.augreg_in21k_ft_in1k")
-
+    timm_version = timm.create_model("vit_small_patch16_224.augreg_in21k_ft_in1k", pretrained=True)
     model.name = "vit"
+    model.patch_embed = timm_version.patch_embed
 
     id2label = model.config.id2label
     model.classes = [id2label[i] for i in range(len(id2label))]
