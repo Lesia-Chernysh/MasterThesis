@@ -784,117 +784,232 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             return self._run(batch_size=batch_size, num_workers=num_workers)
 
     # TODO: general. Also adapt for relevance scores?
-    def find_top_act_neurons(self, topk_neurons: int) -> tuple[dict, dict]:
-        """ Finds the most activating neurons in a model.
-            Stores their polysemanticity score.
-
-        ----------
-        :returns
-        top_k_per_layer: dict(str, dict(int, torch.Tensor)): dict(layer name: dict(neuron id: mean activation))
-        Stores indexes of top k neurons per layer and their mean activations over the whole dataset.
-
-        top_k_max_samples: dict(str, dict(int, torch.Tensor)): dict(layer name: dict(neuron id: ids of ref. samples))
-        Stores indexes of top k neurons per layer and ids of their most activating reference samples.
+    def find_top_act_neurons(
+            self,
+            topk_neurons: int,
+    ) -> tuple[dict, dict]:
         """
-        print("finding top k neurons")
+        Find the most activating neurons in a model.
 
-        topk_n_path = f"{OUTPUTS}/top_k_act_neurons/top_{topk_neurons}_per_layer_{self.model_name}.pt"
-        top_samples_path = f"{OUTPUTS}/top_k_act_neurons/top_{topk_neurons}_max_samples_{self.model_name}.pt"
-        if os.path.exists(topk_n_path) and os.path.exists(top_samples_path):
-            print("Loading top k neurons stats. from existing files ")
+        Returns
+        -------
+        top_k_per_layer
+            Dictionary mapping each layer name to its selected neurons
+            and their mean activations.
 
-            top_k_per_layer = torch.load(topk_n_path)
-            top_k_max_samples = torch.load(top_samples_path)
+        top_k_max_samples
+            Dictionary mapping each layer name and neuron ID to the
+            IDs of its maximally activating reference samples.
+        """
+        print("Finding top-k neurons")
 
-            self.top_k_per_layer, self.top_k_max_samples = top_k_per_layer, top_k_max_samples
+        topk_n_path = (
+            f"{OUTPUTS}/top_k_act_neurons/"
+            f"top_{topk_neurons}_per_layer_{self.model_name}.pt"
+        )
+        top_samples_path = (
+            f"{OUTPUTS}/top_k_act_neurons/"
+            f"top_{topk_neurons}_max_samples_{self.model_name}.pt"
+        )
 
-            return top_k_per_layer, top_k_max_samples
+        # Load existing files only if their layer names are compatible
+        # with the layers used by the current visualizer.
+        if (
+                os.path.exists(topk_n_path)
+                and os.path.exists(top_samples_path)
+        ):
+            print("Loading top-k neurons from existing files")
 
-        def _find_neurons_of_layer(layer_name, start, end):
+            top_k_per_layer = torch.load(
+                topk_n_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+            top_k_max_samples = torch.load(
+                top_samples_path,
+                map_location="cpu",
+                weights_only=False,
+            )
+
+            cached_layers = (
+                    set(top_k_per_layer.keys())
+                    | set(top_k_max_samples.keys())
+            )
+            current_layers = set(self.layer_names)
+
+            unknown_cached_layers = (
+                    cached_layers - current_layers
+            )
+
+            if not unknown_cached_layers:
+                self.top_k_per_layer = top_k_per_layer
+                self.top_k_per_layer_filtered = (
+                    top_k_per_layer
+                )
+                self.top_k_max_samples = (
+                    top_k_max_samples
+                )
+
+                return (
+                    top_k_per_layer,
+                    top_k_max_samples,
+                )
+
+            print(
+                "The existing top-k cache is incompatible "
+                "with the current layer names."
+            )
+            print(
+                "Unknown cached layers:",
+                unknown_cached_layers,
+            )
+            print("Recomputing the top-k neurons...")
+
+        def _find_neurons_of_layer(
+                layer_name,
+                start,
+                end,
+        ):
             for idx, neuron_idx in enumerate(top_indices):
                 neuron_idx = neuron_idx.item()
 
                 if start <= neuron_idx < end:
                     local_idx = neuron_idx - start
-                    top_k_per_layer[layer_name][local_idx] = float(top_values[idx])
 
-        # a ActMaxCache object. parameters: layers: list, aggregation fn, n_collect
+                    top_k_per_layer[layer_name][
+                        local_idx
+                    ] = float(top_values[idx])
+
         act_max_cache = self.actmax_cache
 
-        # collect activations from different layers in one list to sort them by activation
+        # Collect activations from the different layers so that
+        # the neurons can be sorted globally.
         activations_all_layers = []
 
-        # needed to restore neurons indexes
-        layers_lens = dict.fromkeys(act_max_cache.layer_names)
+        # Store the number of neurons in each layer. This is later
+        # used to map global neuron indices back to local indices.
+        layers_lens = dict.fromkeys(
+            act_max_cache.layer_names
+        )
 
-        # append activations per layer to activations_all_layers
         for layer_name in act_max_cache.layer_names:
-                activations_all_layers.append(act_max_cache[layer_name].activations)
-                layers_lens[layer_name] = len(act_max_cache[layer_name].activations)
+            activations_all_layers.append(
+                act_max_cache[layer_name].activations
+            )
 
-        activations_all_layers = torch.cat(activations_all_layers, dim=0)
+            layers_lens[layer_name] = len(
+                act_max_cache[layer_name].activations
+            )
 
-        activations_mean = torch.mean(activations_all_layers, dim=1)
+        activations_all_layers = torch.cat(
+            activations_all_layers,
+            dim=0,
+        )
 
+        # compute the mean activation of each neuron over its maximally activating samples.
+        activations_mean = torch.mean(
+            activations_all_layers,
+            dim=1,
+        )
 
-        # Choose top-k neurons that are the most active
+        # choose the globally most active neurons.
         top_k = torch.topk(
             activations_mean,
             k=topk_neurons,
-            dim=0
+            dim=0,
         )
 
-        k_actual = (top_k.values > 0).sum().item()
+        k_actual = (
+                top_k.values > 0
+        ).sum().item()
 
-        print(f"{k_actual} neurons have activation over 0. Analysing {k_actual} neuron further.")
+        print(
+            f"{k_actual} neurons have activation over 0. "
+            f"Analysing {k_actual} neurons further."
+        )
 
-        # Only keep neurons above the threshold
+        # Only keep neurons whose mean activation is above zero.
         top_values = top_k.values[:k_actual]
         top_indices = top_k.indices[:k_actual]
 
-        # Map global neuron indices back to their original layer indices
+        # Map the global neuron indices back to their respective
+        # layers and local neuron indices.
         top_k_per_layer = {
             layer_name: {}
             for layer_name in act_max_cache.layer_names
         }
 
-        # Collect neuron indexes and activations per layer
         start_idx = 0
 
         for layer_name in act_max_cache.layer_names:
-            end_idx = start_idx + layers_lens[layer_name]
+            end_idx = (
+                    start_idx
+                    + layers_lens[layer_name]
+            )
 
             _find_neurons_of_layer(
                 layer_name,
                 start_idx,
-                end_idx
+                end_idx,
             )
 
             start_idx = end_idx
 
-
         top_k_per_layer_filtered = {}
 
-        # drop empty layers
+        # Preserve the original filtering behavior: layers with
+        # only one selected neuron are excluded.
         for layer, content in top_k_per_layer.items():
             if len(content) > 1:
-                top_k_per_layer_filtered[layer] = content
+                top_k_per_layer_filtered[layer] = (
+                    content
+                )
 
-        print(f"top k per layer: {top_k_per_layer_filtered}")
+        print(
+            "Top-k neurons per layer:",
+            top_k_per_layer_filtered,
+        )
 
-        top_k_max_samples = {k: {} for k in top_k_per_layer_filtered.keys()}  # dict(layer_name: dict(neuron id: max samples))
+        top_k_max_samples = {
+            layer_name: {}
+            for layer_name
+            in top_k_per_layer_filtered
+        }
 
-        for layer_name, value in top_k_per_layer_filtered.items():
-            for neuron_id, _ in value.items():
-                top_k_max_samples[layer_name][neuron_id] = self.get_max_reference(layer_name)[neuron_id]
+        for (
+                layer_name,
+                neurons,
+        ) in top_k_per_layer_filtered.items():
+            for neuron_id in neurons:
+                top_k_max_samples[layer_name][
+                    neuron_id
+                ] = self.get_max_reference(
+                    layer_name
+                )[neuron_id]
 
-        # save
-        torch.save(top_k_per_layer_filtered, topk_n_path)
-        torch.save(top_k_max_samples, top_samples_path)
+        torch.save(
+            top_k_per_layer_filtered,
+            topk_n_path,
+        )
+        torch.save(
+            top_k_max_samples,
+            top_samples_path,
+        )
 
-        self.top_k_per_layer_filtered, self.top_k_max_samples = top_k_per_layer_filtered, top_k_max_samples
+        self.top_k_per_layer = (
+            top_k_per_layer_filtered
+        )
+        self.top_k_per_layer_filtered = (
+            top_k_per_layer_filtered
+        )
+        self.top_k_max_samples = (
+            top_k_max_samples
+        )
 
-        return top_k_per_layer_filtered, top_k_max_samples
+        return (
+            top_k_per_layer_filtered,
+            top_k_max_samples,
+        )
 
 
     # TODO: only for my application. Helper / in embedding file
