@@ -230,7 +230,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
 
         if len(self.dataset) != len(self.dataset_fm):
             raise ValueError(
-                "Model and foundation model datasets should have the same length.",
+                "Model and foundation model my_datasets should have the same length.",
                 (len(self.dataset), len(self.dataset_fm)),
             )
 

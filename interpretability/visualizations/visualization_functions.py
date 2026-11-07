@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 from matplotlib import pyplot as plt
-from datasets.imagenet_mini import ImagenetMini, ImagenetMiniVQA, ImagenetMiniPredLabels
+from my_datasets.imagenet_mini import ImagenetMini, ImagenetMiniVQA, ImagenetMiniPredLabels
 import torch
 import csv
 import cv2
