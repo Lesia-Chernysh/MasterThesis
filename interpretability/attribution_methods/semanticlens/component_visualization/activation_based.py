@@ -1229,7 +1229,31 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
         if os.path.exists(crop_db_path):
             crop_db = torch.load(crop_db_path)
-            self.crop_db = crop_db
+
+            cached_layers = (
+                    set(crop_db.keys())
+            )
+            current_layers = set(self.layer_names)
+
+            unknown_cached_layers = (
+                    cached_layers - current_layers
+            )
+
+            if not unknown_cached_layers:
+                self.crop_db = crop_db
+
+                return crop_db
+
+            print(
+                "The existing crop_db cache is incompatible "
+                "with the current layer names."
+            )
+            print(
+                "Unknown cached layers:",
+                unknown_cached_layers,
+            )
+            print("Recomputing crop_db...")
+
             print(f"Crop_db was loaded from an existing file. It contains {len(crop_db)} crops.")
 
             self.crop_info = {
@@ -1391,8 +1415,34 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         dict
             Dictionary mapping layer names to embedded concept representations.
         """
-        if f"concept_db_{self.model_name}.pt" in os.listdir("."):
-            concept_db = torch.load(f"concept_db_{self.model_name}.pt", map_location=torch.device(self.device))
+        concept_db_path = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_ref_per_neuron/{EMBEDDING_MODEL}/concept_db/concept_db_{self.model_name}.pt"
+        if os.path.exists(concept_db_path):
+            concept_db = torch.load(concept_db_path, map_location=torch.device(self.device))
+
+            cached_layers = (
+                set(concept_db.keys())
+            )
+            current_layers = set(self.layer_names)
+
+            unknown_cached_layers = (
+                    cached_layers - current_layers
+            )
+
+            if not unknown_cached_layers:
+                self.concept_db = concept_db
+
+                return concept_db
+
+            print(
+                "The existing concept_db cache is incompatible "
+                "with the current layer names."
+            )
+            print(
+                "Unknown cached layers:",
+                unknown_cached_layers,
+            )
+            print("Recomputing concept_db...")
+
             self.concept_db = concept_db
             print("Loaded concept_db from an existing file")
 
@@ -1432,14 +1482,15 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
             shape: dataset size x latent embeddings
         '''
-        if f"embeds_{self.model_name}.pt" in os.listdir("."):
+        embeds_path = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_refs_per_neuron/{EMBEDDING_MODEL}/embeds/embeds_{self.model_name}.pt"
+        if os.path.exists(embeds_path):
             print(f"Load embeddings from existing file")
-            embeds = torch.load(f"embeds_{self.model_name}.pt", map_location="cpu")
+            embeds = torch.load(embeds_path, map_location="cpu")
             embeds = embeds[f"embeds_{self.model_name}"]
         else:
             print(f"Embedding the dataset")
             embeds = self._embed_vision_dataset(fm, batch_size, top_k_refs, **kwargs)
-            torch.save({f"embeds_{self.model_name}": embeds}, f"embeds_{self.model_name}.pt")
+            torch.save({f"embeds_{self.model_name}": embeds}, embeds_path)
 
         self.embeds = embeds
 
@@ -1451,6 +1502,6 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
                 concept_db[layer_name][neuron_id] = embeds[[self.neurons_crops_mapping[layer_name][neuron_id]]]
 
         self.concept_db = concept_db
-        torch.save(concept_db, f"concept_db_{self.model_name}.pt")
+        torch.save(concept_db, concept_db_path)
 
         return concept_db
