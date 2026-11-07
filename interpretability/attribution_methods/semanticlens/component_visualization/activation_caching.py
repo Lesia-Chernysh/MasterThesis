@@ -53,6 +53,8 @@ import safetensors
 import safetensors.torch
 import torch
 
+from adapters.semanticlens.base import PreparedBatch
+
 from . import aggregators
 
 logger = logging.getLogger(__name__)
@@ -318,209 +320,314 @@ class ActCache:
 
 class CustomActMax(ActMax):
     """
-        Tool for collecting and storing the top-k maximal activations.
+    Store top-k aggregated activations and their corresponding
+    canonical unaggregated activations.
 
-        This class can be initialized with all dimensions known or can infer the
-        number of latent dimensions from the first batch of data it receives.
+    Canonical activation layout:
 
-        Parameters
-        ----------
-        n_collect : int
-            Number of top activations to collect and store.
-        n_latents : int, optional
-            Number of latent dimensions (e.g., channels, neurons). If None,
-            will be inferred from the first batch of data.
+        [batch, neurons, *spatial]
 
-        Attributes
-        ----------
-        n_collect : int
-            Number of top activations being collected.
-        n_latents : int or None
-            Number of latent dimensions.
-        is_setup : bool
-            Whether the internal tensors have been initialized.
-        activations : torch.Tensor
-            Tensor storing the top activation values.
-        sample_ids : torch.Tensor
-            Tensor storing the sample IDs corresponding to top activations.
-        """
+    Internal cache layout:
 
-    def __init__(self, model_name, n_collect: int, n_latents: int | None = None, n_all_latents: list | None = None):
+        activations:
+            [neurons, n_collect]
+
+        sample_ids:
+            [neurons, n_collect]
+
+        activations_not_aggr:
+            [neurons, n_collect, *spatial]
+
+        spatial_grids:
+            [neurons, n_collect, 2]
+
+        The final dimension of spatial_grids contains:
+            [grid_h, grid_w]
+    """
+
+    def __init__(
+        self,
+        model_name,
+        n_collect: int,
+        n_latents: int | None = None,
+        n_all_latents: list | None = None,
+    ):
+        # Do not call ActMax.__init__, because it invokes
+        # _setup_tensors() using the parent method signature.
         self.model_name = model_name
+        self.n_collect = n_collect
+        self.n_latents = n_latents
         self.n_all_latents = n_all_latents
 
-        super().__init__(n_collect, n_latents)
+        self.is_setup = False
+        self.activations = None
+        self.sample_ids = None
+        self.activations_not_aggr = None
 
-        if n_all_latents is not None:
-            self._setup_tensors()
+    def _setup_tensors(
+            self,
+            n_latents: int,
+            spatial_shape: tuple[int, ...],
+            device: torch.device | str,
+    ):
+        self.n_latents = n_latents
+        self.n_all_latents = list(spatial_shape)
 
-    # TODO: separately for each model ?
-    # add self.activations_not_aggr
-    def _setup_tensors(self):
-        """
-        Initialize the tensors for storing activations and sample IDs.
+        # Preserve previous initialization and dtype.
+        self.activations = torch.zeros(
+            (
+                self.n_latents,
+                self.n_collect,
+            ),
+            dtype=torch.bfloat16,
+            device=device,
+        )
 
-        Creates tensors for storing the top activations and their corresponding
-        sample IDs based on the number of latents and collection size.
-        """
-        self.activations = -torch.zeros(self.n_latents, self.n_collect, dtype=torch.bfloat16)
-        self.sample_ids = -torch.ones(self.n_latents, self.n_collect, dtype=torch.int64)
+        self.sample_ids = torch.full(
+            (
+                self.n_latents,
+                self.n_collect,
+            ),
+            fill_value=-1,
+            dtype=torch.int64,
+            device=device,
+        )
 
-        if self.model_name == "resnet" or self.model_name == "vgg16" or self.model_name == "resnet_50":
-            acts_not_aggr_shape = [self.n_collect] + list(self.n_all_latents) # --> [n_images, n_neurons, *h, *w]
-            acts_not_aggr_shape = [acts_not_aggr_shape[1], acts_not_aggr_shape[0]] + acts_not_aggr_shape[2:]
-        else:
-            acts_not_aggr_shape = [self.n_collect] + list(self.n_all_latents)  # --> [n_images, hid_d, n_neurons]
-            acts_not_aggr_shape = [acts_not_aggr_shape[2], acts_not_aggr_shape[0], acts_not_aggr_shape[1]]
+        self.activations_not_aggr = torch.zeros(
+            (
+                self.n_latents,
+                self.n_collect,
+                *spatial_shape,
+            ),
+            dtype=torch.bfloat16,
+            device=device,
+        )
 
-        self.activations_not_aggr = -torch.zeros(acts_not_aggr_shape, dtype=torch.bfloat16).to(device) # 4D or 3D
         self.is_setup = True
 
-
-    # TODO: separate for each  model/ more general
-    # update self.activations_not_aggr
-    def update(self, acts: torch.Tensor, acts_not_aggr: torch.Tensor, sample_ids: torch.Tensor):
+    def update(
+            self,
+            aggregated_acts: torch.Tensor,
+            canonical_acts: torch.Tensor,
+            sample_ids: torch.Tensor,
+    ):
         """
-        Update activations with a new batch, setting up tensors on first call if needed.
+        aggregated_acts:
+            [batch, neurons]
 
-        Parameters
-        ----------
-        acts : torch.Tensor
-            Aggregated activation tensor with shape (batch_size, n_latents).
-        acts_not_aggr: torch.Tensor
-            Tensor with not aggregated activations. Size differs depending on the model
-        sample_ids : torch.Tensor
-            Sample IDs corresponding to the activations.
-
-        Notes
-        -----
-        If this is the first call and tensors haven't been set up, the number
-        of latents will be inferred from the activation tensor shape.
+        canonical_acts:
+            [batch, neurons, *spatial]
         """
-        if isinstance(acts_not_aggr, tuple):
-          acts_not_aggr = acts_not_aggr[0]
+        if aggregated_acts.ndim != 2:
+            raise ValueError(
+                "aggregated_acts must have shape [B, C], "
+                f"got {tuple(aggregated_acts.shape)}"
+            )
 
-        assert acts.ndim == 2
+        if canonical_acts.ndim < 3:
+            raise ValueError(
+                "canonical_acts must have shape "
+                "[B, C, *spatial], "
+                f"got {tuple(canonical_acts.shape)}"
+            )
+
+        batch_size, n_latents = aggregated_acts.shape
+
+        if canonical_acts.shape[:2] != (
+                batch_size,
+                n_latents,
+        ):
+            raise ValueError(
+                "Aggregated and canonical activation shapes "
+                "are incompatible: "
+                f"{tuple(aggregated_acts.shape)} versus "
+                f"{tuple(canonical_acts.shape)}"
+            )
+
+        spatial_shape = tuple(
+            canonical_acts.shape[2:]
+        )
+        current_device = canonical_acts.device
+
         if not self.is_setup:
-            self.n_latents = acts.shape[1]
-
-            if self.model_name == "qwen":
-                # in qwen, batch size and hidden dimensions are flattened into one dim
-                self.n_all_latents = [256, acts_not_aggr.shape[-1]]
-            else:
-                self.n_all_latents = list(acts_not_aggr.shape[1:])  # the first dim is n of images
-            self._setup_tensors()
-
-        batch_acts = acts.T.to(self.activations.dtype)  # --> shape: [n_neurons, batch]
-        batch_sample_ids = sample_ids.repeat(self.n_latents, 1)
-
-        if self.model_name == "resnet" or self.model_name == "vgg16" or self.model_name == "resnet_50":
-            # [imgs, n_neurons, h, w] --> [n_neurons, imgs h, w]
-            batch_acts_not_aggr = acts_not_aggr.transpose(1, 0).to(self.activations_not_aggr.dtype).to(device)
-            #print(f"batch_acts_not_aggr: {batch_acts_not_aggr.shape}")
-
-        elif self.model_name == "qwen":
-            acts_not_aggr = acts_not_aggr.view(-1, 256, acts_not_aggr.shape[-1])  # b*hid, 1280 --> b, hid, n_neurons
-            batch_acts_not_aggr = acts_not_aggr.permute(2, 0, 1).to(self.activations_not_aggr.dtype).to(device)
-
+            self._setup_tensors(
+                n_latents=n_latents,
+                spatial_shape=spatial_shape,
+                device=current_device,
+            )
         else:
-            # [imgs, hidden, n_neurons] --> [n_neurons, imgs, hidden]
-            batch_acts_not_aggr = acts_not_aggr.permute(2, 0, 1).to(self.activations_not_aggr.dtype).to(device)
+            cached_spatial_shape = tuple(
+                self.activations_not_aggr.shape[2:]
+            )
 
+            if spatial_shape != cached_spatial_shape:
+                raise ValueError(
+                    "Activation shape changed between batches: "
+                    f"expected {cached_spatial_shape}, "
+                    f"got {spatial_shape}"
+                )
 
-        # Find top-k among existing and new activations
-        all_acts = torch.cat([self.activations, batch_acts], dim=1)
-        all_ids = torch.cat([self.sample_ids, batch_sample_ids], dim=1)
+        batch_aggregated = (
+            aggregated_acts
+            .transpose(0, 1)
+            .to(
+                device=current_device,
+                dtype=self.activations.dtype,
+            )
+        )
 
-        #print(f"activations_not_aggr: {self.activations_not_aggr.shape}")
-        #print(f"batch_acts_not_aggr: {batch_acts_not_aggr.shape}")
+        batch_unaggregated = (
+            canonical_acts
+            .permute(
+                1,
+                0,
+                *range(2, canonical_acts.ndim),
+            )
+            .to(
+                device=current_device,
+                dtype=self.activations_not_aggr.dtype,
+            )
+        )
 
-        all_acts_not_aggr = torch.cat([self.activations_not_aggr, batch_acts_not_aggr], dim=1)
+        batch_sample_ids = (
+            sample_ids
+            .to(current_device)
+            .unsqueeze(0)
+            .expand(n_latents, -1)
+        )
 
-        self.activations, indices = torch.topk(all_acts, k=self.n_collect, dim=1)
-        self.sample_ids = torch.gather(all_ids, dim=1, index=indices)
+        all_aggregated = torch.cat(
+            [
+                self.activations.to(current_device),
+                batch_aggregated,
+            ],
+            dim=1,
+        )
 
-        # indices and input tensor should have the same shape
-        if self.model_name == "resnet" or self.model_name == "vgg16" or self.model_name == "resnet_50":
-            h, w = self.n_all_latents[-2],  self.n_all_latents[-2]
-            indices_reshaped = indices.unsqueeze(-1).unsqueeze(-1).to(device)  # resnet: [1024, 10, 1, 1]
-            indices_reshaped = indices_reshaped.expand(-1, -1, h, w)  # resnet [1024, 10, 14, 14]
-        else:
-            hid = self.n_all_latents[0] # n_all_latents = [hid, n_neurons]
-            indices_reshaped = indices.unsqueeze(-1).to(device)  # [n_nueorns, 10, 1]
-            indices_reshaped = indices_reshaped.expand(-1, -1, hid)
+        all_sample_ids = torch.cat(
+            [
+                self.sample_ids.to(current_device),
+                batch_sample_ids,
+            ],
+            dim=1,
+        )
 
+        all_unaggregated = torch.cat(
+            [
+                self.activations_not_aggr.to(
+                    current_device
+                ),
+                batch_unaggregated,
+            ],
+            dim=1,
+        )
 
-        self.activations_not_aggr = torch.gather(all_acts_not_aggr, dim=1, index=indices_reshaped).to(device)
+        top_activations, indices = torch.topk(
+            all_aggregated,
+            k=self.n_collect,
+            dim=1,
+        )
 
+        index_shape = (
+                list(indices.shape)
+                + [1] * len(spatial_shape)
+        )
+        expanded_shape = (
+                list(indices.shape)
+                + list(spatial_shape)
+        )
 
-    # store also activations_not_aggr
-    def store(self, file_path: str | Path, metadata: dict[str, str] | None = None):
-        """
-        Store tensors and metadata to a safetensors file.
+        gather_indices = (
+            indices
+            .reshape(index_shape)
+            .expand(expanded_shape)
+        )
 
-        Parameters
-        ----------
-        file_path : str or Path
-            Path where the data should be saved.
-        metadata : dict[str, str], optional
-            Additional metadata to store with the tensors.
+        self.activations = (
+            top_activations.detach().cpu()
+        )
 
-        Notes
-        -----
-        If the instance is not set up, the method will log a warning and skip storage.
-        """
+        self.sample_ids = torch.gather(
+            all_sample_ids,
+            dim=1,
+            index=indices,
+        ).detach().cpu()
+
+        self.activations_not_aggr = torch.gather(
+            all_unaggregated,
+            dim=1,
+            index=gather_indices,
+        ).detach().cpu()
+
+    def store(
+        self,
+        file_path: str | Path,
+        metadata: dict[str, str] | None = None,
+    ):
         if not self.is_setup:
-            logger.warning("Attempted to store an un-initialized ActMax instance; skipping.")
+            logger.warning(
+                "Attempted to store an uninitialized "
+                "CustomActMax instance; skipping."
+            )
             return
 
         tensors = {
             "activations": self.activations,
             "sample_ids": self.sample_ids,
-            "not_aggr_activations": self.activations_not_aggr
+            "not_aggr_activations": (
+                self.activations_not_aggr
+            ),
         }
-        safetensors.torch.save_file(tensors, file_path, metadata=metadata)
-        logger.debug(f"Stored ActMax data to {file_path}")
 
-    # change, so n_all_latent is also loaded
+        safetensors.torch.save_file(
+            tensors,
+            file_path,
+            metadata=metadata,
+        )
+
     @classmethod
-    def load(cls, file_path: str | Path) -> ActMax:
-        """
-        Load an ActMax instance from a safetensors file.
-
-        Parameters
-        ----------
-        file_path : str or Path
-            Path to the safetensors file to load.
-
-        Returns
-        -------
-        CustomActMax
-            Loaded ActMax instance with data from the file.
-
-        Raises
-        ------
-        ValueError
-            If the file is missing required metadata for loading.
-        """
-        with safetensors.safe_open(file_path, framework="pt") as f:
-            metadata = f.metadata()
-            if metadata is None:
-                raise ValueError(f"File {file_path} is missing required metadata for loading.")
-            tensors = {k: f.get_tensor(k) for k in f.keys()}
-
+    def load(
+            cls,
+            file_path: str | Path,
+    ) -> CustomActMax:
         import ast
 
-        n_collect = int(metadata["n_collect"])
-        n_latents = int(metadata["n_latents"])
-        n_all_latents = ast.literal_eval(metadata["n_all_latents"])
-        model_name = str(metadata["model_name"])
+        with safetensors.safe_open(
+                file_path,
+                framework="pt",
+        ) as file:
+            metadata = file.metadata()
 
-        instance = cls(model_name=model_name, n_collect=n_collect, n_latents=n_latents, n_all_latents=n_all_latents)
+            if metadata is None:
+                raise ValueError(
+                    f"File {file_path} is missing metadata"
+                )
 
-        instance.activations = tensors["activations"]
-        instance.sample_ids = tensors["sample_ids"]
-        instance.activations_not_aggr = tensors["not_aggr_activations"]
+            tensors = {
+                key: file.get_tensor(key)
+                for key in file.keys()
+            }
+
+        instance = cls(
+            model_name=str(metadata["model_name"]),
+            n_collect=int(metadata["n_collect"]),
+            n_latents=int(metadata["n_latents"]),
+            n_all_latents=ast.literal_eval(
+                metadata["n_all_latents"]
+            ),
+        )
+
+        instance.activations = tensors[
+            "activations"
+        ]
+        instance.sample_ids = tensors[
+            "sample_ids"
+        ]
+        instance.activations_not_aggr = tensors[
+            "not_aggr_activations"
+        ]
+
+        instance.is_setup = True
 
         return instance
 
@@ -743,80 +850,77 @@ class ActMaxCache(ActCache):
             logger.info(f"Successfully loaded data for {loaded_count} layer(s) from {directory}")
 
 class CustomActMaxCache(ActMaxCache):
-    """
-    Collects, aggregates, and finds the top-k activations for specified layers.
-
-    This class extends ActCache to not only collect activations but also aggregate
-    them using a specified function and maintain only the top-k activating samples
-    for each component in each layer.
-
-    Parameters
-    ----------
-    layer_names : list of str
-        Names of the model layers to analyze.
-    aggregation_fn : callable
-        Function to aggregate activations (e.g., mean over spatial dimensions).
-        Must be a named function, not a lambda.
-    n_collect : int
-        Number of top activating samples to collect per component.
-
-    Attributes
-    ----------
-    aggregation_fn : callable
-        The aggregation function being used.
-    n_collect : int
-        Number of samples collected per component.
-    sample_idx_counter : int
-        Counter for tracking sample indices during data processing.
-    agg_fn_name : str
-        Name of the aggregation function for metadata.
-    cache : dict[str, CustomActMax]
-        Dictionary mapping layer names to ActMax instances.
-
-    Raises
-    ------
-    ValueError
-        If the aggregation function is a lambda or has no name.
-    """
-
-    # set cache values to CustomActMax instances
-    def __init__(self, model_name, layer_names: list[str], aggregation_fn, n_collect: int):
-        super().__init__(layer_names, aggregation_fn, n_collect)
-        self.model_name = model_name
-
-        self.cache: dict[str, CustomActMax] = {name: CustomActMax(n_collect=n_collect, model_name=self.model_name) for name in layer_names}
-
-
-    # also add not aggregated activations to cache
-    def _get_hook(self, layer_name: str):
-        """
-        Create a hook that aggregates activations and updates the ActMax instance.
-
-        Parameters
-        ----------
-        name : str
-            Name of the layer to create a hook for.
-
-        Returns
-        -------
-        callable
-            Hook function that processes layer outputs and updates the cache.
-        """
-
-        def hook_fn(module, ins, outs):
-            aggregated_acts = self.aggregation_fn(outs)
-            batch_size = aggregated_acts.shape[0]
-
-            assert aggregated_acts.ndim == 2, "Something is wrong with the aggregation_fn"
-
-            # Generate sample IDs for this batch
-            sample_ids = torch.arange(
-                self.sample_idx_counter[layer_name], self.sample_idx_counter[layer_name] + batch_size
+    def __init__(
+        self,
+        adapter,
+        model_name: str,
+        layer_names: list[str],
+        aggregation_fn,
+        n_collect: int,
+    ):
+        if adapter is None:
+            raise ValueError(
+                "A SemanticLens adapter is required"
             )
-            self.sample_idx_counter[layer_name] += batch_size
 
-            # Update the corresponding ActMax instance
-            self.cache[layer_name].update(aggregated_acts, outs, sample_ids)
+        super().__init__(
+            layer_names,
+            aggregation_fn,
+            n_collect,
+        )
+
+        self.adapter = adapter
+        self.model_name = model_name
+        self.current_batch = None
+
+        self.cache: dict[str, CustomActMax] = {
+            layer_name: CustomActMax(
+                n_collect=n_collect,
+            )
+            for layer_name in layer_names
+        }
+
+    def set_current_batch( self, prepared_batch: PreparedBatch):
+        self.current_batch = prepared_batch
+
+    def _get_hook(self, layer_name):
+        def hook_fn(module, inputs, output):
+            if self.current_batch is None:
+                raise RuntimeError(
+                    "No prepared batch is associated with "
+                    "the current forward pass"
+                )
+
+            canonical_acts = (
+                self.adapter.canonicalize_activations(
+                    output,
+                    self.current_batch,
+                )
+            )
+
+            # Preserve your existing aggregation behavior.
+            aggregated_acts = self.aggregation_fn(
+                output
+            )
+
+            batch_size = canonical_acts.shape[0]
+
+            sample_ids = torch.arange(
+                self.sample_idx_counter[layer_name],
+                self.sample_idx_counter[layer_name]
+                + batch_size,
+                dtype=torch.int64,
+            )
+
+            self.sample_idx_counter[
+                layer_name
+            ] += batch_size
+
+            self.cache[layer_name].update(
+                aggregated_acts=aggregated_acts,
+                canonical_acts=canonical_acts,
+                sample_ids=sample_ids,
+            )
 
         return hook_fn
 

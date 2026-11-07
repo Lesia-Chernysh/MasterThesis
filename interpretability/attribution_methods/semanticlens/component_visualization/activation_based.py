@@ -34,6 +34,7 @@ from semanticlens.component_visualization.activation_caching import CustomActMax
 from semanticlens.component_visualization.base import AbstractComponentVisualizer
 from semanticlens.utils.helper import get_fallback_name, restore_crop
 from semanticlens.scores import polysemanticity_score
+from adapters.semanticlens.base import SpatialInfo
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
         layer_names: list[str],
         num_samples: int,
         device=None,
+        adapter=None,
         aggregate_fn=None,
         cache_dir: str | None = None,
     ):
@@ -171,6 +173,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
             If any layer in layer_names is not found in the model.
         """
         self.model = model
+        self.adapter = adapter
         self.dataset = dataset_model
         self.dataset_fm = dataset_fm
         self._init_cache_dir(cache_dir)
@@ -187,6 +190,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
             aggregate_fn = aggregators.aggregate_conv_mean
 
         self.actmax_cache = CustomActMaxCache(
+            adapter=adapter,
             model_name=self.model.name,
             layer_names=self.layer_names,
             aggregation_fn=aggregate_fn,
@@ -578,62 +582,46 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
 
 class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
     @torch.no_grad()
-    def __init__(self,
-                 model,
-                 dataset_model,
-                 dataset_fm,
-                 layer_names,
-                 num_samples,
-                 device=None,
-                 aggregate_fn=None,
-                 cache_dir=None,
-                 model_name=None
-        ):
-        super().__init__(
+    def __init__(
+            self,
             model,
             dataset_model,
             dataset_fm,
             layer_names,
             num_samples,
+            device=None,
+            adapter=None,
+            aggregate_fn=None,
+            cache_dir=None,
+            model_name=None,
+    ):
+        if adapter is None:
+            raise ValueError(
+                "CustomActivationComponentVisualizer "
+                "requires an adapter"
+            )
+
+        if model_name is not None:
+            model.name = model_name
+
+        super().__init__(
+            model=model,
+            dataset_model=dataset_model,
+            dataset_fm=dataset_fm,
+            layer_names=layer_names,
+            num_samples=num_samples,
             device=device,
+            adapter=adapter,
             aggregate_fn=aggregate_fn,
-            cache_dir=cache_dir
+            cache_dir=cache_dir,
         )
-        self.model = model
-        self.dataset = dataset_model
-        self.dataset_fm = dataset_fm
-        self._init_cache_dir(cache_dir)
-        self._validate_args()
 
-        self.layer_names = layer_names
-        self._check_layers()
-
-        device = device or next(model.parameters()).device
-        self.model.to(device)
-
-        if aggregate_fn is None:
-            print("Debugging")
-            logger.warning(f"No aggregation_fn provided using default: {aggregators.aggregate_conv_mean.__name__}")
-            aggregate_fn = aggregators.aggregate_conv_mean
+        self.model_name = self.model.name
         self.component_ids = None
-        self.model_name = model_name
 
-        self.actmax_cache = CustomActMaxCache(
-            model_name=self.model_name,
-            layer_names=self.layer_names,
-            aggregation_fn=aggregate_fn,
-            n_collect = num_samples
-        )
+        self.top_k_per_layer = None
+        self.top_k_max_samples = None
 
-        # for activation analysis
-        self.top_k_per_layer, self.top_k_max_samples = None, None
-
-        # for masking & cropping
-        self.grid_h, self.grid_w  = None, None  # for qwen
-        self.text_tokens_n = None               # for vilt
-        self.img_h, self.img_w = None, None     # for vilt
-
-        # for concept db
         self.crop_info = None
         self.crop_db = None
         self.neurons_crops_mapping = None
@@ -661,83 +649,50 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
     @torch.no_grad()
     # override to pass the inputs in the form needed for ViLT and Qwen-VL
-    def _run(self, batch_size: int = 64, num_workers: int = 0):
-        """Actual ActMax-Cache computation/population and caching."""
+    @torch.no_grad()
+    def _run(
+            self,
+            batch_size: int = 64,
+            num_workers: int = 0,
+    ):
         dataloader = torch.utils.data.DataLoader(
-                self.dataset,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
+            self.dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
         )
-        # TODO: separate runs for each model
-        if self.model_name == "vilt":
-            print(f"Cache root exists: {self._cache_root}")
 
-            processor = ViltProcessor.from_pretrained(
-                "dandelin/vilt-b32-finetuned-vqa"
-            )
-
-            with self.actmax_cache.hook_context(self.model):
-                for i, (images, _) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Collecting ActMax"):
-                    text="What object is depicted on the image?"
-                    text_batch = [text] * len(images)
-
-                    encoding = processor(images=images.to(self.device), text=text_batch, return_tensors="pt", padding=True)
-                    # TODO: basically,  this part is the same: forward pass, but for different kind of input. Make individual functions to create the input
-                    _ = self.model(**encoding)
-
-                    # TODO: find another way to store/ retrieve this info, since it is not saved after the fv is gone
-                    # Find out the number of text tokens
-                    self.text_tokens_n = encoding['input_ids'].shape[1]
-
-                    _, _, self.img_h, self.img_w = encoding["pixel_values"].shape
-
-        elif self.model_name == "qwen":
-            print(f"Cache root exists: {self._cache_root}")
-
-            processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
-
-            with self.actmax_cache.hook_context(self.model):
-                for images, _ in tqdm(dataloader, total=len(dataloader), desc="Collecting ActMax"):
-                    text="Answer in ONE word. What object is depicted on the image?"
-
-                    template = {
-                                "role": "user",
-                                "content": [
-                                    {"type": "image", "image": None},
-                                    {"type": "text", "text": text}
-                                    ],
-                                }
-                    conversations = []
-
-                    for img in images:
-                        conv = copy.deepcopy(template)
-                        conv["content"][0]["image"] = img
-                        conversations.append([conv])
-
-                    inputs = processor.apply_chat_template(
-                    conversations,
-                    add_generation_prompt=True,
-                    tokenize=True,
-                    padding=True,          # critical for batching
-                    return_dict=True,
-                    return_tensors="pt",
+        with self.actmax_cache.hook_context(
+                self.model
+        ):
+            for images, _ in tqdm(
+                    dataloader,
+                    total=len(dataloader),
+                    desc="Collecting ActMax",
+            ):
+                prepared_batch = (
+                    self.adapter.prepare_batch(
+                        images,
+                        self.device,
                     )
+                )
 
-                    _ = self.model(**inputs)
+                self.actmax_cache.set_current_batch(
+                    prepared_batch
+                )
 
-                    grid_thw = inputs["image_grid_thw"][0].cpu().numpy()
-                    self.grid_h, self.grid_w = grid_thw[1], grid_thw[2]
+                # Exactly one forward pass.
+                self.adapter.forward(
+                    self.model,
+                    prepared_batch,
+                )
 
-        else:
-            print(f"Cache root exists: {self._cache_root}")
-            with self.actmax_cache.hook_context(self.model):
-                for i, (images, _) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Collecting ActMax"):
-                    _ = self.model(images.to(self.device))
+        self.actmax_cache.current_batch = None
 
         if self._cache_root:
-            self.actmax_cache.store(self.storage_dir)
-            logger.debug(f"Stored activation maximization cache at {self.storage_dir}")
+            self.actmax_cache.store(
+                self.storage_dir
+            )
 
         return self.actmax_cache.cache
 
@@ -1012,7 +967,6 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         )
 
 
-    # TODO: only for my application. Helper / in embedding file
     def get_mask_and_crop(self, sample, layer, neuron_id, grid_h=None, grid_w=None, img_h= None, img_w = None, text_tokens_n=None):
         """
         Returns information necessary to create crops: original img path and bounding box.
@@ -1044,71 +998,31 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
                         orig_img = np.random.randint(0, 255, (600, 800, 3), dtype=np.uint8)
                         h_orig, w_orig, _ = orig_img.shape
 
+        cached_activation = (
+            self.actmax_cache.cache[layer]
+            .activations_not_aggr[
+                neuron_id,
+                img_pos,
+            ]
+        )
 
-        if self.model_name == "resnet" or self.model_name == "vgg16" or self.model_name == "resnet_50":
-                        # heatmap_2d
-                        #   resnet: [imgs, hid=1024, channl_h, channl_w]
-                        #   vgg16:  [imgs, hid=512,  channl_h, channl_w]
-                        heatmap_2d = self.actmax_cache.cache[layer].activations_not_aggr[neuron_id, img_pos].cpu().float().numpy()
-                        grid_h, grid_w = heatmap_2d.shape[-2], heatmap_2d.shape[-1]
+        heatmap_2d = self.adapter.create_heatmap(
+            cached_activation
+        )
 
-        elif self.model_name == "vit":
-                        # vit acts: [imgs, n_tokens=197, n_neurons=384]
-                        # select activations of this neuron: 1D
-                        neuron_acts = self.actmax_cache.cache[layer].activations_not_aggr[neuron_id, img_pos, :].cpu().float().numpy()
+        if heatmap_2d.ndim != 2:
+            raise ValueError(
+                "Adapter must return a two-dimensional heatmap, "
+                f"got shape {heatmap_2d.shape}"
+            )
 
-                        # vit divides an image into 14x14 patches (14 * 14 = 196 patches + 1 CLS token = 197)
-                        patch_h, patch_w = self.model.patch_embed.proj.kernel_size  # kernel size: (16, 16)
-                        grid_h, grid_w = int(224/patch_h), int(224/patch_w)  #  --> 14, 14
-                        # leave out CLS token
-                        patch_acts = neuron_acts[1:]
-
-                        # reshape the activation vector into a 2D matrix
-                        heatmap_2d = patch_acts.reshape(grid_h, grid_w)
-
-
-        elif self.model_name == "vilt":
-                        all_token_activations = (
-                            self.actmax_cache.cache[layer]
-                            .activations_not_aggr[neuron_id, img_pos, :]
-                            .cpu()
-                            .float()
-                            .numpy()
-                        )
-
-                        patch_h, patch_w = (
-                            self.model.vilt.embeddings
-                            .patch_embeddings.projection.kernel_size
-                        )
-
-                        grid_h, grid_w = int(224/patch_h), int(224/patch_w)  #  --> 14, 14
-                        num_patches = grid_h * grid_w
-
-                        # Everything before the final image patches consists of text/special tokens.
-                        visual_offset = len(all_token_activations) - num_patches
-                        visual_patch_activations = all_token_activations[visual_offset:]
-
-                        heatmap_2d = visual_patch_activations.reshape(grid_h, grid_w)
-
-
-        elif self.model_name == "qwen":
-                        # all activations: [2816, 1280] --> imgs * hidden, num of neurons
-
-                        # reshape 0 dim of activations n_img*hidden_dim, neurons --> n_img, hidden_dim, neurons
-                        hidden_dim = 256
-                        #n_neurons = self.actmax_cache.cache[layer].activations_not_aggr.shape[1]
-                        #reshaped_activations = self.actmax_cache.cache[layer].activations_not_aggr.view(-1, hidden_dim, n_neurons)
-
-                        # select activations of this neuron
-                        neuron_activations = self.actmax_cache.cache[layer].activations_not_aggr[neuron_id, img_pos, :].float().cpu().numpy()
-
-                        # -------------------------------
-                        # Activation map: patch grid
-                        # -------------------------------
-
-                        grid_h, grid_w = self.grid_h, self.grid_w
-                        heatmap_2d = neuron_activations.reshape(grid_h, grid_w)  # 16, 16
-
+        grid_h, grid_w = heatmap_2d.shape
+        if grid_h <= 0 or grid_w <= 0:
+            raise ValueError(
+                f"Invalid spatial grid {grid_h}x{grid_w} "
+                f"for layer={layer}, neuron={neuron_id}, "
+                f"sample={sample}"
+            )
 
         # use magnitude (keeps negative activations)
         heatmap_2d = np.maximum(heatmap_2d, 0)
@@ -1117,8 +1031,6 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         max_val = heatmap_2d.max()
         if max_val > 0:
             heatmap_2d = heatmap_2d / max_val
-
-
         # -------------------------------
         # Threshold on patch grid
         # -------------------------------
