@@ -876,6 +876,7 @@ class CustomActMaxCache(ActMaxCache):
         self.cache: dict[str, CustomActMax] = {
             layer_name: CustomActMax(
                 n_collect=n_collect,
+                model_name=model_name,
             )
             for layer_name in layer_names
         }
