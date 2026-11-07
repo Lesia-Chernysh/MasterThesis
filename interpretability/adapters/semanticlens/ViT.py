@@ -3,10 +3,9 @@ import math
 import numpy as np
 import torch
 
-from base import (
+from interpretability.adapters.semanticlens.base import (
     PreparedBatch,
-    SemanticLensAdapter,
-    SpatialInfo,
+    SemanticLensAdapter
 )
 
 

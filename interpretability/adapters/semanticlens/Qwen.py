@@ -4,10 +4,10 @@ import numpy as np
 import torch
 from transformers import AutoProcessor
 
-from base import (
+from interpretability.adapters.semanticlens.base import (
     PreparedBatch,
     SemanticLensAdapter,
-    SpatialInfo,
+    SpatialInfo
 )
 
 class QwenAdapter(SemanticLensAdapter):
