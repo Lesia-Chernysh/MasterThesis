@@ -1144,29 +1144,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         if os.path.exists(crop_db_path):
             crop_db = torch.load(crop_db_path)
 
-            cached_layers = (
-                    set(crop_db.keys())
-            )
-            current_layers = set(self.layer_names)
-
-            unknown_cached_layers = (
-                    cached_layers - current_layers
-            )
-
-            if not unknown_cached_layers:
-                self.crop_db = crop_db
-
-                return crop_db
-
-            print(
-                "The existing crop_db cache is incompatible "
-                "with the current layer names."
-            )
-            print(
-                "Unknown cached layers:",
-                unknown_cached_layers,
-            )
-            print("Recomputing crop_db...")
+            self.crop_db = crop_db
 
             print(f"Crop_db was loaded from an existing file. It contains {len(crop_db)} crops.")
 
