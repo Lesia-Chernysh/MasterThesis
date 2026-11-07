@@ -29,12 +29,14 @@ from configs.general_cofig import *
 
 from transformers import AutoProcessor, ViltProcessor
 
-from semanticlens.component_visualization import aggregators
-from semanticlens.component_visualization.activation_caching import CustomActMaxCache
-from semanticlens.component_visualization.base import AbstractComponentVisualizer
-from semanticlens.utils.helper import get_fallback_name, restore_crop
-from semanticlens.scores import polysemanticity_score
-from adapters.semanticlens.base import SpatialInfo
+from . import aggregators
+from .activation_caching import CustomActMaxCache
+from .base import AbstractComponentVisualizer
+from ..utils.helper import (
+    get_fallback_name,
+    restore_crop,
+)
+from ..scores import polysemanticity_score
 
 logger = logging.getLogger(__name__)
 
