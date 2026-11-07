@@ -1307,7 +1307,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         dict
             Dictionary mapping layer names to embedded concept representations.
         """
-        concept_db_path = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_ref_per_neuron/{EMBEDDING_MODEL}/concept_db/concept_db_{self.model_name}.pt"
+        concept_db_path = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_refs_per_neuron/{EMBEDDING_MODEL}/concept_db/concept_db_{self.model_name}.pt"
         if os.path.exists(concept_db_path):
             concept_db = torch.load(concept_db_path, map_location=torch.device(self.device))
 
