@@ -312,8 +312,18 @@ def _parse_neuron_id(n_id: str | int, tgt_dict: dict) -> int | str:
 
 def _visualize_activations(cv_object, dataset, images_path: list, sample_ids, layer, neuron_id):
     def _parse_image(img):
-        if type(img) == Image.Image:
-            return np.asarray(img)
+        if isinstance(img, Image.Image):
+            img = np.asarray(img)
+
+        elif torch.is_tensor(img):
+            img = img.detach().cpu().numpy()
+
+        img = np.asarray(img)
+
+        # C × H × W -> H × W × C
+        if img.ndim == 3 and img.shape[0] in (1, 3, 4):
+            img = np.moveaxis(img, 0, -1)
+
         return img
 
     n_images = len(images_path)
@@ -340,7 +350,7 @@ def _visualize_activations(cv_object, dataset, images_path: list, sample_ids, la
         orig_img = _parse_image(orig_img)
         #orig_img = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
 
-        h_orig, w_orig, _ = orig_img.shape
+        h_orig, w_orig = orig_img.shape[:2]
 
         heatmap = cv2.imread(
             f"{OUTPUTS}/act_heatmaps/heatmaps_{cv_object.model_name}/{layer}_n{neuron_id}_s{sample_id}.jpeg",
@@ -402,15 +412,9 @@ def _visualize_activations(cv_object, dataset, images_path: list, sample_ids, la
             interpolation=cv2.INTER_NEAREST
         )
 
-        mask_img_3d = np.repeat(
-            mask_img[:, :, None],
-            3,
-            axis=2
-        )
+        mask_img_3d = mask_img[..., None]
 
-        masked_img = (
-            orig_img * mask_img_3d
-        ).astype(np.uint8)
+        masked_img = orig_img * mask_img_3d
 
         # Resize heatmap for overlay
         heatmap_resized = cv2.resize(
