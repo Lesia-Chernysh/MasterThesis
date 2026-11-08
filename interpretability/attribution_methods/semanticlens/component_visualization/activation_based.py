@@ -767,6 +767,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         )
         top_samples_path = (
             f"{OUTPUTS}/top_k_act_neurons/"
+            f"{N_SAMPLES}_ref_samples/"
             f"top_{topk_neurons}_max_samples_{self.model_name}.pt"
         )
 
