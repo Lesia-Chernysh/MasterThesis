@@ -1223,6 +1223,8 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         for i, el in enumerate(crop_db):
             el["crop_id"] = i
 
+        crop_db_dir = f"{OUTPUTS}/embeddings/semanticlens/{self.actmax_cache.n_collect}_refs_per_neuron/crop_db"
+        os.makedirs(crop_db_dir, exist_ok=True)
         torch.save(crop_db, crop_db_path)
 
         self.crop_db = crop_db
@@ -1394,6 +1396,8 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         else:
             print(f"Embedding the dataset")
             embeds = self._embed_vision_dataset(fm, batch_size, top_k_refs, **kwargs)
+            embeds_dir = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_refs_per_neuron/{EMBEDDING_MODEL}/embeds"
+            os.makedirs(embeds_dir, exist_ok=True)
             torch.save({f"embeds_{self.model_name}": embeds}, embeds_path)
 
         self.embeds = embeds
@@ -1406,6 +1410,8 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
                 concept_db[layer_name][neuron_id] = embeds[[self.neurons_crops_mapping[layer_name][neuron_id]]]
 
         self.concept_db = concept_db
+        concept_db_dir = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_refs_per_neuron/{EMBEDDING_MODEL}/concept_db"
+        os.makedirs(concept_db_dir, exist_ok=True)
         torch.save(concept_db, concept_db_path)
 
         return concept_db
