@@ -1247,7 +1247,19 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
                 for crop_info in crops_info:
                     if neuron_id not in self.neurons_crops_mapping[layer]:
-                        self.neurons_crops_mapping[layer][neuron_id] = [crop_lookup[crop_info]]
+                        try:
+                            self.neurons_crops_mapping[layer][neuron_id] = [crop_lookup[crop_info]]
+                        except KeyError: # means that cache contains either different images path or crops
+                            print("Recomputing crop_db, since it contains incompatible information.")
+                            crop_db_path = f"{OUTPUTS}/embeddings/semanticlens/{self.actmax_cache.n_collect}_refs_per_neuron/crop_db/crop_db_{self.model_name}.pt"
+                            os.remove(crop_db_path)
+                            self.crop_db = self.create_crop_db()
+                            crop_lookup = {
+                                (item['image_path'], tuple(item['bbox'])): item['crop_id']
+                                for item in self.crop_db
+                            }
+                            self.neurons_crops_mapping[layer][neuron_id] = [crop_lookup[crop_info]]
+
                     else:
                         self.neurons_crops_mapping[layer][neuron_id].append(crop_lookup[crop_info])
 
