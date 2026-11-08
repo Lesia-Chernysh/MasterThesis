@@ -10,6 +10,20 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from my_datasets.indexed_sample_dataset import IndexedSampleDataset
 
+# converters
+def convert_to_json(obj: torch.Tensor | dict | tuple | list | int | float | str | bool):
+    if isinstance(obj, torch.Tensor):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {str(k): convert_to_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_json(item) for item in obj]
+    elif isinstance(obj, (int, float, str, bool)) or obj is None:
+        return obj
+    else:
+        return str(obj)
+
+
 # select polysemantic neurons based on polysem scores
 def select_polysem_neurons(scores: dict, threshold: float = 0.5):
     polysem_neurons = {}
@@ -19,7 +33,7 @@ def select_polysem_neurons(scores: dict, threshold: float = 0.5):
             score = score[0]
 
             if score >= threshold:
-                polysem_neurons[f"{layer}_{neuron_id}"] = score
+                polysem_neurons[f"{layer}__{neuron_id}"] = score
 
     return polysem_neurons
 
@@ -166,7 +180,7 @@ def show_neuron_clusters(
     Show the original crop, activation heatmap and overlay
     for every reference, grouped by semantic cluster.
     """
-    layer, neuron_id = layer_neuron.split("_")[0], layer_neuron.split("_")[1]
+    layer, neuron_id = layer_neuron.split("__")[0], layer_neuron.split("__")[1]
 
     labels = np.asarray(labels)
 
@@ -288,6 +302,8 @@ def find_polysem_candidates(
         polysem_neurons,
         concept_db,
         min_cluster_size,
+        silhoutte_score_threshold=0.5,
+        confidence_threshold=0.5,
         neurons_crops_mapping=None,
         visualize_polysem_cands: bool = False
 ) -> list:
@@ -301,8 +317,8 @@ def find_polysem_candidates(
 
     for neuron in polysem_neurons:
         print(f"\nNeuron: {neuron}")
-        layer = neuron.split("_")[0]
-        neuron_id = int(neuron.split("_")[1])
+        layer = neuron.split("__")[0]
+        neuron_id = int(neuron.split("__")[1])
 
         embeddings = concept_db[layer][neuron_id]
         embeddings = normalize(
@@ -332,6 +348,7 @@ def find_polysem_candidates(
         print("Number of noise samples:", (labels == -1).sum())
 
         probabilities = clusterer.probabilities_
+        print(probabilities)
 
         cluster_prob = dict.fromkeys(cluster_ids, 0)
         for index, (
@@ -345,11 +362,10 @@ def find_polysem_candidates(
             cluster_prob[cluster] = prob / np.count_nonzero(labels == int(cluster))
 
         # Check confidence
-        min_confidence = 0.5
         count_confident_classes = 0
 
         for cluster, mean_prob in cluster_prob.items():
-            if mean_prob >= min_confidence:
+            if mean_prob >= confidence_threshold:
                 count_confident_classes += 1
 
         # Calculate silhouette score
@@ -371,11 +387,13 @@ def find_polysem_candidates(
         else:
             score = None
 
+        print(f"silhouette score: {score}")
+
         # Summerize, if the neuron is a polysemantic candidate
         is_polysemantic_candidate = (
             len(cluster_ids) >= 2
             and count_confident_classes >= 2
-            and (score is not None and score >= 0.5)
+            and (score is not None and score >= silhoutte_score_threshold)
         )
 
         if is_polysemantic_candidate:
