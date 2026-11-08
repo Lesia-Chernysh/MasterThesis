@@ -310,8 +310,30 @@ def _parse_neuron_id(n_id: str | int, tgt_dict: dict) -> int | str:
     return n_id
 
 
-def _visualize_activations(cv_object, dataset, images_path: list, sample_ids, layer, neuron_id):
+def _visualize_activations(
+    cv_object,
+    dataset,
+    images_path: list,
+    sample_ids,
+    layer,
+    neuron_id,
+    samples_per_figure=10,
+):
+    imagenet_mean = np.array(
+        [0.485, 0.456, 0.406],
+        dtype=np.float32
+    ).reshape(1, 1, 3)
+
+    imagenet_std = np.array(
+        [0.229, 0.224, 0.225],
+        dtype=np.float32
+    ).reshape(1, 1, 3)
+
     def _parse_image(img):
+        """
+        Convert a PIL image, PyTorch tensor, or NumPy array into an
+        H x W x C NumPy image suitable for matplotlib.
+        """
         if isinstance(img, Image.Image):
             img = np.asarray(img)
 
@@ -320,157 +342,250 @@ def _visualize_activations(cv_object, dataset, images_path: list, sample_ids, la
 
         img = np.asarray(img)
 
-        # C × H × W -> H × W × C
-        if img.ndim == 3 and img.shape[0] in (1, 3, 4):
+        # Grayscale H x W -> H x W x 1
+        if img.ndim == 2:
+            img = img[..., None]
+
+        # C x H x W -> H x W x C
+        elif (
+            img.ndim == 3
+            and img.shape[0] in (1, 3, 4)
+            and img.shape[-1] not in (1, 3, 4)
+        ):
             img = np.moveaxis(img, 0, -1)
 
-        return img
+        if img.ndim != 3:
+            raise ValueError(
+                f"Expected a 3-dimensional image, but got shape {img.shape}."
+            )
 
-    n_images = len(images_path)
+        # Discard alpha channel if present.
+        if img.shape[-1] == 4:
+            img = img[..., :3]
 
-    fig, axes = plt.subplots(
-        4, n_images,
-        figsize=(3 * n_images, 12),
-        squeeze=False
+        # Repeat grayscale channel for RGB display.
+        if img.shape[-1] == 1:
+            img = np.repeat(img, 3, axis=-1)
+
+        if img.shape[-1] != 3:
+            raise ValueError(
+                f"Expected 1, 3, or 4 channels, but got shape {img.shape}."
+            )
+
+        img = img.astype(np.float32)
+
+        # Model input normalized using ImageNet mean and std.
+        if img.min() < 0:
+            img = img * imagenet_std + imagenet_mean
+
+        # Ordinary uint8-like image converted to float.
+        elif img.max() > 1:
+            img = img / 255.0
+
+        # imshow expects floating-point RGB values in [0, 1].
+        return np.clip(img, 0.0, 1.0)
+
+    n_images = min(
+        len(images_path),
+        len(sample_ids)
+    )
+
+    if n_images == 0:
+        raise ValueError("No reference samples were provided.")
+
+    parsed_neuron_id = _parse_neuron_id(
+        neuron_id,
+        cv_object.crop_info[layer]
     )
 
     row_titles = [
         "Original Image",
         "Activation Map (Overlay)",
         "Masked Output",
-        "Cropped Output"
+        "Cropped Output",
     ]
 
-    for i in range(n_images):
-        img_path = images_path[i][0]
-        sample_id = sample_ids[i]
+    figures = []
 
-        #orig_img = cv2.imread(img_path)
-        orig_img = dataset[sample_id][0]
-        orig_img = _parse_image(orig_img)
-        #orig_img = cv2.cvtColor(orig_img, cv2.COLOR_BGR2RGB)
+    for batch_start in range(0, n_images, samples_per_figure):
+        batch_end = min(
+            batch_start + samples_per_figure,
+            n_images
+        )
+        batch_size = batch_end - batch_start
 
-        h_orig, w_orig = orig_img.shape[:2]
-
-        heatmap = cv2.imread(
-            f"{OUTPUTS}/act_heatmaps/heatmaps_{cv_object.model_name}/{layer}_n{neuron_id}_s{sample_id}.jpeg",
-            cv2.IMREAD_GRAYSCALE
+        fig, axes = plt.subplots(
+            4,
+            batch_size,
+            figsize=(2.5 * batch_size, 9),
+            squeeze=False,
         )
 
-        heatmap_array = heatmap.astype(np.float32) / 255.0
+        for column, sample_index in enumerate(
+            range(batch_start, batch_end)
+        ):
+            img_path = images_path[sample_index][0]
+            sample_id = sample_ids[sample_index]
 
-        neuron_id = _parse_neuron_id(neuron_id, cv_object.crop_info[layer])
-        bbox = cv_object.crop_info[layer][neuron_id][i][1]
-        cropped_img = restore_crop(img_path, bbox)
+            sample = dataset[sample_id]
+            orig_img = _parse_image(sample[0])
+            class_name = sample[1]
 
-        # Get mask
-        binary_patch_mask = (
-            heatmap_array >= THRESHOLD_ACT
-        ).astype(np.uint8)
+            h_orig, w_orig = orig_img.shape[:2]
 
-        # Safety: make sure at least one patch exists
-        if binary_patch_mask.sum() == 0:
-            top_k = 5
-
-            flat_idx = np.argsort(
-                heatmap_array.flatten()
-            )[-top_k:]
-
-            binary_patch_mask = np.zeros_like(
-                heatmap_array, dtype=np.uint8
+            heatmap_path = (
+                f"{OUTPUTS}/act_heatmaps/"
+                f"heatmaps_{cv_object.model_name}/"
+                f"{layer}_n{neuron_id}_s{sample_id}.jpeg"
             )
 
-            for idx in flat_idx:
-                y, x = np.unravel_index(
-                    idx, heatmap_array.shape
+            heatmap = cv2.imread(
+                heatmap_path,
+                cv2.IMREAD_GRAYSCALE
+            )
+
+            if heatmap is None:
+                raise FileNotFoundError(
+                    f"Could not load heatmap: {heatmap_path}"
                 )
-                binary_patch_mask[y, x] = 1
 
-        # Connected components
-        num_labels, labels, stats, centroids = (
-            cv2.connectedComponentsWithStats(
-                binary_patch_mask,
-                connectivity=8
-            )
-        )
-
-        if num_labels > 1:
-            largest_label = (
-                1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
+            heatmap_array = (
+                heatmap.astype(np.float32) / 255.0
             )
 
-            component_mask = (
-                labels == largest_label
+            bbox = cv_object.crop_info[layer][
+                parsed_neuron_id
+            ][sample_index][1]
+
+            cropped_img = restore_crop(img_path, bbox)
+            cropped_img = _parse_image(cropped_img)
+
+            # Create the binary activation mask.
+            binary_patch_mask = (
+                heatmap_array >= THRESHOLD_ACT
             ).astype(np.uint8)
-        else:
-            component_mask = binary_patch_mask
 
-        # Full-resolution mask
-        mask_img = cv2.resize(
-            component_mask,
-            (w_orig, h_orig),
-            interpolation=cv2.INTER_NEAREST
+            # If the threshold selects nothing, keep the five
+            # strongest heatmap positions.
+            if binary_patch_mask.sum() == 0:
+                top_k = min(5, heatmap_array.size)
+
+                flat_indices = np.argpartition(
+                    heatmap_array.ravel(),
+                    -top_k
+                )[-top_k:]
+
+                binary_patch_mask = np.zeros_like(
+                    heatmap_array,
+                    dtype=np.uint8
+                )
+
+                rows, columns = np.unravel_index(
+                    flat_indices,
+                    heatmap_array.shape
+                )
+
+                binary_patch_mask[rows, columns] = 1
+
+            # Retain the largest connected activation component.
+            num_labels, labels, stats, _ = (
+                cv2.connectedComponentsWithStats(
+                    binary_patch_mask,
+                    connectivity=8
+                )
+            )
+
+            if num_labels > 1:
+                largest_label = (
+                    1
+                    + np.argmax(
+                        stats[1:, cv2.CC_STAT_AREA]
+                    )
+                )
+
+                component_mask = (
+                    labels == largest_label
+                ).astype(np.uint8)
+            else:
+                component_mask = binary_patch_mask
+
+            # Resize the activation mask to the image resolution.
+            mask_img = cv2.resize(
+                component_mask,
+                (w_orig, h_orig),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(np.float32)
+
+            # (H, W, 3) multiplied by (H, W, 1).
+            masked_img = orig_img * mask_img[..., None]
+
+            heatmap_resized = cv2.resize(
+                heatmap_array,
+                (w_orig, h_orig),
+                interpolation=cv2.INTER_LINEAR
+            )
+
+            axes[0, column].set_title(
+                f"{class_name}\nSample {sample_id}",
+                fontsize=9
+            )
+
+            # Original image
+            axes[0, column].imshow(orig_img)
+
+            # Activation overlay
+            axes[1, column].imshow(orig_img)
+            axes[1, column].imshow(
+                heatmap_resized,
+                cmap="jet",
+                alpha=0.5,
+                vmin=0.0,
+                vmax=1.0
+            )
+
+            # Masked image
+            axes[2, column].imshow(masked_img)
+
+            # Restored crop
+            axes[3, column].imshow(cropped_img)
+
+            for row in range(4):
+                axes[row, column].axis("off")
+
+        for row, title in enumerate(row_titles):
+            axes[row, 0].set_ylabel(
+                title,
+                fontsize=11,
+                rotation=90,
+                labelpad=18
+            )
+            axes[row, 0].yaxis.set_label_coords(
+                -0.12,
+                0.5
+            )
+
+        figure_number = (
+            batch_start // samples_per_figure + 1
+        )
+        number_of_figures = int(
+            np.ceil(n_images / samples_per_figure)
         )
 
-        mask_img_3d = mask_img[..., None]
-
-        masked_img = orig_img * mask_img_3d
-
-        # Resize heatmap for overlay
-        heatmap_resized = cv2.resize(
-            heatmap,
-            (w_orig, h_orig),
-            interpolation=cv2.INTER_LINEAR
+        fig.suptitle(
+            f"Layer: {layer} | Neuron: {parsed_neuron_id} | "
+            f"References {batch_start + 1}–{batch_end} "
+            f"({figure_number}/{number_of_figures})",
+            fontsize=15
         )
 
-        # Class name for column title
-        class_name = dataset[sample_id][1]
-
-        axes[0, i].set_title(
-            f"{class_name}\nSample {sample_id}",
-            fontsize=10
+        fig.tight_layout(
+            rect=[0.02, 0.0, 1.0, 0.95]
         )
 
-        # Row 1: Original
-        axes[0, i].imshow(orig_img)
+        plt.show()
+        figures.append(fig)
 
-        # Row 2: Overlay
-        axes[1, i].imshow(orig_img)
-        axes[1, i].imshow(
-            heatmap_resized,
-            cmap="jet",
-            alpha=0.5
-        )
-
-        # Row 3: Mask
-        axes[2, i].imshow(masked_img)
-
-        # Row 4: Crop
-        axes[3, i].imshow(cropped_img)
-
-        for row in range(4):
-            axes[row, i].axis("off")
-
-    # Add row labels on the left
-    for row, title in enumerate(row_titles):
-        axes[row, 0].set_ylabel(
-            title,
-            fontsize=12,
-            rotation=90,
-            labelpad=15
-        )
-        axes[row, 0].yaxis.set_label_coords(-0.1, 0.5)
-
-    fig.suptitle(
-        f"Layer: {layer} | Neuron: {neuron_id}",
-        fontsize=16
-    )
-
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
-
-    return fig
-
+    return figures
 
 def visualize_neuron(cv_object,
                      dataset,
