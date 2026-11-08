@@ -10,5 +10,6 @@ Classes
 """
 
 from semanticlens.foundation_models.clip import ClipMobile, OpenClip, SigLipV2
+from semanticlens.foundation_models.dino import DINOv2
 
-__all__ = ["OpenClip", "ClipMobile", "SigLipV2"]
+__all__ = ["OpenClip", "ClipMobile", "SigLipV2", "DINOv2"]
