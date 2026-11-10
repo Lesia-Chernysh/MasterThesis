@@ -8,6 +8,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import normalize
 from scipy.optimize import linear_sum_assignment
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
@@ -845,4 +846,19 @@ def select_negatives(
         ],
         "similarities": similarity[rows, cols]
     }
+
+
+def estimate_feature_direction(
+    positive_activations,
+    control_activations,
+):
+    direction = (
+        positive_activations.mean(dim=0)
+        - control_activations.mean(dim=0)
+    )
+
+    return F.normalize(
+        direction,
+        dim=0,
+    )
 
