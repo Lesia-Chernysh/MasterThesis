@@ -1,14 +1,15 @@
+from collections import Counter
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
-import torch
+from my_datasets.indexed_sample_dataset import IndexedSampleDataset
+import numpy as np
 from sklearn.cluster import HDBSCAN
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import normalize
-from collections import Counter
+from scipy.optimize import linear_sum_assignment
+import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
-from my_datasets.indexed_sample_dataset import IndexedSampleDataset
 
 # converters
 def convert_to_json(obj: torch.Tensor | dict | tuple | list | int | float | str | bool):
@@ -315,8 +316,9 @@ def find_polysem_candidates(
 
     polysemantic_candidates = []
 
-    for neuron in polysem_neurons:
+    for neuron, pol_score in polysem_neurons.items():
         print(f"\nNeuron: {neuron}")
+        print(f"Polysemanticity score: {pol_score}")
         layer = neuron.split("__")[0]
         neuron_id = int(neuron.split("__")[1])
 
@@ -335,6 +337,7 @@ def find_polysem_candidates(
 
 
         # Check number of clusters and noise samples
+        print(cv_obj.actmax_cache.cache[layer].activations[neuron_id])
         print("Labels:", labels)
         print("Cluster sizes:", Counter(labels))
 
@@ -756,3 +759,90 @@ def collect_activation_patterns(
         )
 
     return results
+
+
+# Select negative samples for clusters
+def select_negatives(
+    clip_embeddings,
+    top50_indices,
+    cluster_labels,
+    target_cluster,
+    seed=42
+):
+    """
+    Select hard negatives from other HDBSCAN clusters
+    of the same neuron's top-50 activating images.
+
+    CLIP embeddings must correspond to top50_indices
+    in exactly the same order.
+    """
+
+    rng = np.random.default_rng(seed)
+
+    # Convert torch tensor to NumPy
+    if isinstance(clip_embeddings, torch.Tensor):
+        E = clip_embeddings.detach().cpu().numpy()
+    else:
+        E = np.asarray(clip_embeddings)
+
+    E = normalize(E, axis=1)
+
+    top50_indices = np.asarray(top50_indices).ravel()
+    labels = np.asarray(cluster_labels).ravel()
+    target_cluster = np.asarray(target_cluster).item()
+
+    if not (
+        len(E) == len(top50_indices) == len(labels)
+    ):
+        raise ValueError(
+            "CLIP embeddings, indices and labels "
+            "must have the same number of samples."
+        )
+
+    if target_cluster == -1:
+        raise ValueError("Noise is not a valid target cluster.")
+
+    # Local indices (0 to 49)
+    positive_local = np.flatnonzero(
+        labels == target_cluster
+    )
+
+    negative_local = np.flatnonzero(
+        (labels != target_cluster) &
+        (labels != -1)
+    )
+
+    if len(positive_local) == 0:
+        raise ValueError("No positive samples.")
+
+    if len(negative_local) == 0:
+        raise ValueError("No other clusters available.")
+
+    # Randomize tie-breaking
+    positive_local = rng.permutation(positive_local)
+    negative_local = rng.permutation(negative_local)
+
+    # CLIP cosine similarity matrix
+    similarity = (
+        E[positive_local] @ E[negative_local].T
+    )
+
+    # Find optimal one-to-one matching
+    # Maximizing similarity = minimizing -similarity
+    rows, cols = linear_sum_assignment(-similarity)
+
+    matched_positive_local = positive_local[rows]
+    matched_negative_local = negative_local[cols]
+
+    return {
+        "positive_local": matched_positive_local,
+        "negative_local": matched_negative_local,
+        "positive_global": top50_indices[
+            matched_positive_local
+        ],
+        "negative_global": top50_indices[
+            matched_negative_local
+        ],
+        "similarities": similarity[rows, cols]
+    }
+
