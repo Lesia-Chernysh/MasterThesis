@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import logging
 import warnings
-from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
-import copy
 import cv2
 import os
 
@@ -27,8 +25,6 @@ from torch import nn
 
 from configs.general_cofig import *
 
-from transformers import AutoProcessor, ViltProcessor
-
 from . import aggregators
 from .activation_caching import CustomActMaxCache
 from .base import AbstractComponentVisualizer
@@ -36,7 +32,7 @@ from ..utils.helper import (
     get_fallback_name,
     restore_crop,
 )
-from ..scores import polysemanticity_score
+from my_datasets.general_datasets import CropDataset
 
 logger = logging.getLogger(__name__)
 
@@ -1280,16 +1276,6 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
     def _embed_vision_dataset(self, fm, batch_size, top_k_refs, **kwargs):
         def pil_list_collate(batch):
             return list(batch)
-
-        class CropDataset(torch.utils.data.Dataset):
-            def __init__(self, crops):
-                self.crops = crops
-
-            def __len__(self):
-                return len(self.crops)
-
-            def __getitem__(self, idx):
-                return Image.fromarray(self.crops[idx])
 
         crops = self._create_crops_list()
         loader = DataLoader(
