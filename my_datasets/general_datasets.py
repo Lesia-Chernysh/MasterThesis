@@ -1,3 +1,5 @@
+import torch
+from PIL import Image
 from torch.utils.data import Dataset
 
 class IndexedSampleDataset(Dataset):
@@ -37,3 +39,14 @@ class IndexedSampleDataset(Dataset):
             image,
             *remaining_values,
         )
+
+
+class CropDataset(torch.utils.data.Dataset):
+        def __init__(self, crops):
+            self.crops = crops
+
+        def __len__(self):
+            return len(self.crops)
+
+        def __getitem__(self, idx):
+            return Image.fromarray(self.crops[idx])

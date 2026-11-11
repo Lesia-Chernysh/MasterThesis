@@ -1,7 +1,7 @@
 from collections import Counter
 import cv2
 import matplotlib.pyplot as plt
-from my_datasets.indexed_sample_dataset import IndexedSampleDataset
+from my_datasets.general_datasets import IndexedSampleDataset
 import numpy as np
 from sklearn.cluster import HDBSCAN
 from sklearn.metrics import silhouette_score
