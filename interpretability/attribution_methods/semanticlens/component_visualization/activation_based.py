@@ -31,6 +31,7 @@ from .base import AbstractComponentVisualizer
 from ..utils.helper import (
     get_fallback_name,
     restore_crop,
+    create_crops_list
 )
 from my_datasets.general_datasets import CropDataset
 
@@ -1277,7 +1278,9 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         def pil_list_collate(batch):
             return list(batch)
 
-        crops = self._create_crops_list()
+        if self.crop_db is None:
+            self.crop_db = self.create_crop_db()
+        crops = create_crops_list(self.crop_db)
         loader = DataLoader(
             CropDataset(crops),
             batch_size=batch_size,

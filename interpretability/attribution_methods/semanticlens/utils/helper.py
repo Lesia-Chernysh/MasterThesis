@@ -11,6 +11,10 @@ from torchvision import transforms
 
 from semanticlens.scores import polysemanticity_score
 
+# ------------------------ For image crops --------------------------------------------------------
+def create_crops_list(crop_db):
+    return [restore_crop(el["image_path"], el["bbox"]) for el in crop_db]
+
 def restore_crop(img_path, bbox):
     """
     Creates an array of a crop based on the original image and bounding box.
@@ -24,6 +28,7 @@ def restore_crop(img_path, bbox):
 
     return orig_img[ymin:ymax, xmin:xmax]
 
+# --------------------------- Metrics -----------------------------------------------------------------------------
 def get_polysem_score(concept_db: dict) -> dict:
     print("Computing polysemanticity scores per neuron in each layer...")
     polysem_scores = {layer: {} for layer in concept_db}
@@ -36,10 +41,11 @@ def get_polysem_score(concept_db: dict) -> dict:
 
     return polysem_scores
 
+# -------------------------------------------------------------------------------------------------------------------------------------------------------
+
 def _string_hash(s: str) -> int:
     """Generate a stable hash for a given string."""
     return int(hashlib.sha256(s.encode()).hexdigest(), 16)
-
 
 def get_fallback_name(obj):
     """Function to get a fallback name for an object."""
