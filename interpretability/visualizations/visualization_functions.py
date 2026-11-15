@@ -86,7 +86,6 @@ def report_and_plot_cached_activation_scores(
         activation_cache = torch.load(activation_cache_path)
 
         layer_names = list(activation_cache.keys())
-        reference_count = 10
         neuron_scores = []
         for l, stats in activation_cache.items():
             per_layer = []
@@ -99,7 +98,7 @@ def report_and_plot_cached_activation_scores(
     print(f"\n{'=' * 72}\nCached activation-score statistics\n{'=' * 72}")
     print(
         "Each value is one neuron's mean activation over its "
-        f"top {reference_count} cached references."
+        f"top {N_SAMPLES} cached references."
     )
     for layer_index, layer in enumerate(layer_names):
         values = neuron_scores[layer_index]
