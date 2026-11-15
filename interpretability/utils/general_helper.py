@@ -39,266 +39,7 @@ def select_polysem_neurons(scores: dict, threshold: float = 0.5):
 
     return polysem_neurons
 
-
-# find polysemanticity candidates based on clusters properties
-def load_crop_and_heatmap(
-    record,
-    cv_obj,
-    layer,
-    neuron_id,
-    img_pos,
-):
-    image_path = record["image_path"]
-
-    image = cv2.imread(image_path)
-
-    if image is None:
-        raise FileNotFoundError(
-            f"Could not read image: {image_path}"
-        )
-
-    image = cv2.cvtColor(
-        image,
-        cv2.COLOR_BGR2RGB,
-    )
-
-    ymin, ymax, xmin, xmax = (
-        int(value)
-        for value in record["bbox"]
-    )
-
-    crop = image[
-        ymin:ymax,
-        xmin:xmax,
-    ]
-
-    if crop.size == 0:
-        raise ValueError(
-            f"Empty crop for record: {record}"
-        )
-
-    layer_cache = cv_obj.actmax_cache.cache[
-        layer
-    ]
-
-    neuron_id = int(neuron_id)
-    img_pos = int(img_pos)
-
-    if neuron_id >= layer_cache.activations_not_aggr.shape[0]:
-        raise IndexError(
-            f"Neuron {neuron_id} is outside activation "
-            f"shape {tuple(layer_cache.activations_not_aggr.shape)}"
-        )
-
-    if img_pos >= layer_cache.activations_not_aggr.shape[1]:
-        raise IndexError(
-            f"Reference position {img_pos} is outside "
-            f"activation shape "
-            f"{tuple(layer_cache.activations_not_aggr.shape)}"
-        )
-
-    cached_activation = (
-        layer_cache.activations_not_aggr[
-            neuron_id,
-            img_pos,
-        ]
-    )
-
-    heatmap_2d = cv_obj.adapter.create_heatmap(
-        cached_activation
-    )
-
-    heatmap_2d = np.asarray(
-        heatmap_2d,
-        dtype=np.float32,
-    )
-
-    if heatmap_2d.ndim != 2:
-        raise ValueError(
-            "The adapter must return a two-dimensional "
-            f"heatmap, got {heatmap_2d.shape}"
-        )
-
-    heatmap_2d = np.maximum(
-        heatmap_2d,
-        0,
-    )
-
-    maximum = heatmap_2d.max()
-
-    if maximum > 0:
-        heatmap_2d /= maximum
-
-    image_height, image_width = image.shape[:2]
-
-    full_heatmap = cv2.resize(
-        heatmap_2d,
-        (
-            image_width,
-            image_height,
-        ),
-        interpolation=cv2.INTER_LINEAR,
-    )
-
-    heatmap_crop = full_heatmap[
-        ymin:ymax,
-        xmin:xmax,
-    ]
-
-    heatmap_uint8 = (
-        np.clip(heatmap_crop, 0, 1)
-        * 255
-    ).astype(np.uint8)
-
-    heatmap_colored = cv2.applyColorMap(
-        heatmap_uint8,
-        cv2.COLORMAP_JET,
-    )
-
-    heatmap_colored = cv2.cvtColor(
-        heatmap_colored,
-        cv2.COLOR_BGR2RGB,
-    )
-
-    overlay = cv2.addWeighted(
-        crop,
-        0.55,
-        heatmap_colored,
-        0.45,
-        0,
-    )
-
-    return crop, heatmap_colored, overlay
-
-
-def show_neuron_clusters(
-    layer_neuron,
-    crop_records,
-    labels,
-    cv_obj,
-    probabilities=None,
-):
-    """
-    Show the original crop, activation heatmap and overlay
-    for every reference, grouped by semantic cluster.
-    """
-    layer, neuron_id = layer_neuron.split("__")[0], layer_neuron.split("__")[1]
-
-    labels = np.asarray(labels)
-
-    if len(crop_records) != len(labels):
-        raise ValueError(
-            f"{len(crop_records)} crop records but "
-            f"{len(labels)} labels"
-        )
-
-    if probabilities is not None:
-        probabilities = np.asarray(
-            probabilities
-        )
-
-        if len(probabilities) != len(labels):
-            raise ValueError(
-                f"{len(probabilities)} probabilities but "
-                f"{len(labels)} labels"
-            )
-
-    unique_labels = sorted(
-        np.unique(labels)
-    )
-
-    for cluster_id in unique_labels:
-        indices = np.where(
-            labels == cluster_id
-        )[0]
-
-        cluster_name = (
-            "Noise"
-            if cluster_id == -1
-            else f"Cluster {cluster_id}"
-        )
-
-        print(
-            f"{cluster_name}: "
-            f"{len(indices)} samples"
-        )
-
-        # Each sample gets one column. The rows show:
-        #   1. original crop
-        #   2. heatmap
-        #   3. overlay
-        figure, axes = plt.subplots(
-            nrows=1,
-            ncols=len(indices),
-            figsize=(
-                3 * len(indices),
-                8,
-            ),
-            squeeze=False,
-        )
-
-        for column, reference_index in enumerate(
-            indices
-        ):
-            record = crop_records[
-                reference_index
-            ]
-
-            (
-                crop,
-                heatmap,
-                overlay,
-            ) = load_crop_and_heatmap(
-                record=record,
-                cv_obj=cv_obj,
-                layer=layer,
-                neuron_id=neuron_id,
-                img_pos=reference_index,
-            )
-
-            title = (
-                f"ref={reference_index}"
-            )
-
-            if probabilities is not None:
-                title += (
-                    "\n"
-                    f"p={probabilities[reference_index]:.2f}"
-                )
-
-            '''axes[0, column].imshow(crop)
-            axes[0, column].set_title(title)
-
-            axes[1, column].imshow(heatmap)'''
-            axes[0, column].imshow(overlay)
-
-            for row in range(1):
-                axes[row, column].axis(
-                    "off"
-                )
-
-        '''axes[0, 0].set_ylabel(
-            "Crop",
-            fontsize=11,
-        )
-        axes[1, 0].set_ylabel(
-            "Activation",
-            fontsize=11,
-        )'''
-        axes[0, 0].set_ylabel(
-            "Overlay",
-            fontsize=11,
-        )
-
-        figure.suptitle(
-            f"{layer}, neuron {neuron_id}: "
-            f"{cluster_name}",
-            fontsize=14,
-        )
-
-        plt.tight_layout()
-        plt.show()
-
+# based on clusters' separability, confidence, and number
 def find_polysem_candidates(
         cv_obj,
         polysem_neurons,
@@ -449,6 +190,262 @@ def find_polysem_candidates(
 
     return polysemantic_candidates
 
+def show_neuron_clusters(
+    layer_neuron,
+    crop_records,
+    labels,
+    cv_obj,
+    probabilities=None,
+):
+    """
+    Show the original crop, activation heatmap and overlay
+    for every reference, grouped by semantic cluster.
+    """
+    layer, neuron_id = layer_neuron.split("__")[0], layer_neuron.split("__")[1]
+
+    labels = np.asarray(labels)
+
+    if len(crop_records) != len(labels):
+        raise ValueError(
+            f"{len(crop_records)} crop records but "
+            f"{len(labels)} labels"
+        )
+
+    if probabilities is not None:
+        probabilities = np.asarray(
+            probabilities
+        )
+
+        if len(probabilities) != len(labels):
+            raise ValueError(
+                f"{len(probabilities)} probabilities but "
+                f"{len(labels)} labels"
+            )
+
+    unique_labels = sorted(
+        np.unique(labels)
+    )
+
+    for cluster_id in unique_labels:
+        indices = np.where(
+            labels == cluster_id
+        )[0]
+
+        cluster_name = (
+            "Noise"
+            if cluster_id == -1
+            else f"Cluster {cluster_id}"
+        )
+
+        print(
+            f"{cluster_name}: "
+            f"{len(indices)} samples"
+        )
+
+        # Each sample gets one column. The rows show:
+        #   1. original crop
+        #   2. heatmap
+        #   3. overlay
+        figure, axes = plt.subplots(
+            nrows=1,
+            ncols=len(indices),
+            figsize=(
+                3 * len(indices),
+                8,
+            ),
+            squeeze=False,
+        )
+
+        for column, reference_index in enumerate(
+            indices
+        ):
+            record = crop_records[
+                reference_index
+            ]
+
+            (
+                crop,
+                heatmap,
+                overlay,
+            ) = load_crop_and_heatmap(
+                record=record,
+                cv_obj=cv_obj,
+                layer=layer,
+                neuron_id=neuron_id,
+                img_pos=reference_index,
+            )
+
+            title = (
+                f"ref={reference_index}"
+            )
+
+            if probabilities is not None:
+                title += (
+                    "\n"
+                    f"p={probabilities[reference_index]:.2f}"
+                )
+
+            '''axes[0, column].imshow(crop)
+            axes[0, column].set_title(title)
+
+            axes[1, column].imshow(heatmap)'''
+            axes[0, column].imshow(overlay)
+
+            for row in range(1):
+                axes[row, column].axis(
+                    "off"
+                )
+
+        '''axes[0, 0].set_ylabel(
+            "Crop",
+            fontsize=11,
+        )
+        axes[1, 0].set_ylabel(
+            "Activation",
+            fontsize=11,
+        )'''
+        axes[0, 0].set_ylabel(
+            "Overlay",
+            fontsize=11,
+        )
+
+        figure.suptitle(
+            f"{layer}, neuron {neuron_id}: "
+            f"{cluster_name}",
+            fontsize=14,
+        )
+
+        plt.tight_layout()
+        plt.show()
+
+def load_crop_and_heatmap(
+    record,
+    cv_obj,
+    layer,
+    neuron_id,
+    img_pos,
+):
+    image_path = record["image_path"]
+
+    image = cv2.imread(image_path)
+
+    if image is None:
+        raise FileNotFoundError(
+            f"Could not read image: {image_path}"
+        )
+
+    image = cv2.cvtColor(
+        image,
+        cv2.COLOR_BGR2RGB,
+    )
+
+    ymin, ymax, xmin, xmax = (
+        int(value)
+        for value in record["bbox"]
+    )
+
+    crop = image[
+        ymin:ymax,
+        xmin:xmax,
+    ]
+
+    if crop.size == 0:
+        raise ValueError(
+            f"Empty crop for record: {record}"
+        )
+
+    layer_cache = cv_obj.actmax_cache.cache[
+        layer
+    ]
+
+    neuron_id = int(neuron_id)
+    img_pos = int(img_pos)
+
+    if neuron_id >= layer_cache.activations_not_aggr.shape[0]:
+        raise IndexError(
+            f"Neuron {neuron_id} is outside activation "
+            f"shape {tuple(layer_cache.activations_not_aggr.shape)}"
+        )
+
+    if img_pos >= layer_cache.activations_not_aggr.shape[1]:
+        raise IndexError(
+            f"Reference position {img_pos} is outside "
+            f"activation shape "
+            f"{tuple(layer_cache.activations_not_aggr.shape)}"
+        )
+
+    cached_activation = (
+        layer_cache.activations_not_aggr[
+            neuron_id,
+            img_pos,
+        ]
+    )
+
+    heatmap_2d = cv_obj.adapter.create_heatmap(
+        cached_activation
+    )
+
+    heatmap_2d = np.asarray(
+        heatmap_2d,
+        dtype=np.float32,
+    )
+
+    if heatmap_2d.ndim != 2:
+        raise ValueError(
+            "The adapter must return a two-dimensional "
+            f"heatmap, got {heatmap_2d.shape}"
+        )
+
+    heatmap_2d = np.maximum(
+        heatmap_2d,
+        0,
+    )
+
+    maximum = heatmap_2d.max()
+
+    if maximum > 0:
+        heatmap_2d /= maximum
+
+    image_height, image_width = image.shape[:2]
+
+    full_heatmap = cv2.resize(
+        heatmap_2d,
+        (
+            image_width,
+            image_height,
+        ),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    heatmap_crop = full_heatmap[
+        ymin:ymax,
+        xmin:xmax,
+    ]
+
+    heatmap_uint8 = (
+        np.clip(heatmap_crop, 0, 1)
+        * 255
+    ).astype(np.uint8)
+
+    heatmap_colored = cv2.applyColorMap(
+        heatmap_uint8,
+        cv2.COLORMAP_JET,
+    )
+
+    heatmap_colored = cv2.cvtColor(
+        heatmap_colored,
+        cv2.COLOR_BGR2RGB,
+    )
+
+    overlay = cv2.addWeighted(
+        crop,
+        0.55,
+        heatmap_colored,
+        0.45,
+        0,
+    )
+
+    return crop, heatmap_colored, overlay
 
 # collect activation patterns of layers based on selected samples
 def collect_activation_patterns(
