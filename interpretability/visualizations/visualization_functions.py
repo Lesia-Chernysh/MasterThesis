@@ -9,6 +9,7 @@ import torch
 import csv
 import cv2
 import numpy as np
+import math
 
 from configs.general_cofig import *
 # --------------------------------------------------- Config -------------------------------------------------------
@@ -47,125 +48,359 @@ def report_and_plot_cached_activation_scores(
     output_dir,
     bins=40,
 ):
-    """Report and plot per-layer neuron scores from the ActMax cache.
+    """
+    Report and plot per-layer neuron activation scores.
 
-    A neuron's score is the mean of its retained top-reference activation
-    values, which is also the score used by ``global_top_neurons``. Therefore
-    these are distributions over neurons, not over every image activation in
-    the dataset.
+    Each neuron's score is the mean of its retained
+    top-reference activation values.
 
-    Parameters
-    ----------
-    activation_cache_path:
-        Path to an npz: ``all_visual_mlp_actmax.npz`` or pt file: "top_500_per_layer_*model*.pt".
-    output_dir:
-        Directory in which CSV and PNG outputs are written.
-    bins:
-        Number of histogram bins.
+    Supported formats:
+        .npz:
+            layer_names: (L,)
+            top_values: (L, K, N)
+            reference_count: scalar
+
+        .pt:
+            {
+                layer_name: {
+                    neuron_id: activations,
+                    ...
+                },
+                ...
+            }
 
     Returns
     -------
     dict
-        ``{layer_name: {mean, min, max, neuron_count}}``.
+        {
+            layer_name: {
+                "mean": float,
+                "min": float,
+                "max": float,
+                "neuron_count": int
+            }
+        }
     """
+
+    activation_cache_path = Path(activation_cache_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if activation_cache_path.split(".")[-1] == "npz":
+    if bins < 1:
+        raise ValueError("bins must be >= 1")
+
+    # Unified representation:
+    # {layer_name: np.ndarray of per-neuron mean scores}
+    neuron_scores = {}
+
+    # --------------------------------------------------
+    # Load NPZ cache
+    # --------------------------------------------------
+    if activation_cache_path.suffix.lower() == ".npz":
+
         print("Input is a .npz file")
-        activation_cache = np.load(activation_cache_path)
 
-        layer_names = activation_cache["layer_names"].astype(str)
-        reference_count = int(activation_cache["reference_count"])
-        top_values = activation_cache["top_values"][:, :reference_count, :]
+        with np.load(activation_cache_path) as cache:
+            layer_names = cache["layer_names"].astype(str)
+            reference_count = int(cache["reference_count"])
+            top_values = cache["top_values"]
 
-        neuron_scores = np.mean(top_values, axis=1)  # layers x neurons
+            if top_values.ndim != 3:
+                raise ValueError(
+                    "Expected top_values with shape "
+                    "(layers, references, neurons), "
+                    f"got {top_values.shape}"
+                )
 
-    elif activation_cache_path.split(".")[-1] == "pt":
+            if len(layer_names) != top_values.shape[0]:
+                raise ValueError(
+                    "Number of layer names does not match "
+                    "top_values."
+                )
+
+            if not 1 <= reference_count <= top_values.shape[1]:
+                raise ValueError(
+                    f"Invalid reference_count={reference_count}"
+                )
+
+            top_values = top_values[:, :reference_count, :]
+
+            # Mean across references -> (layers, neurons)
+            scores = np.mean(
+                top_values.astype(np.float64),
+                axis=1
+            )
+
+            for i, layer in enumerate(layer_names):
+                neuron_scores[str(layer)] = scores[i]
+
+    # --------------------------------------------------
+    # Load PT cache
+    # --------------------------------------------------
+    elif activation_cache_path.suffix.lower() == ".pt":
+
         print("Input is a .pt file")
-        activation_cache = torch.load(activation_cache_path)
 
-        layer_names = list(activation_cache.keys())
-        neuron_scores = []
-        for l, stats in activation_cache.items():
-            per_layer = []
-            for _, acts in stats.items():
-                per_layer.append(acts)
-            neuron_scores.append(np.array(per_layer))
+        # Only load cache files from trusted sources.
+        cache = torch.load(
+            activation_cache_path,
+            map_location="cpu",
+            weights_only=True,
+        )
 
+        for layer, layer_data in cache.items():
 
+            per_neuron_scores = []
+
+            for neuron_id, activations in layer_data.items():
+
+                if torch.is_tensor(activations):
+                    activations = (
+                        activations.detach().cpu().numpy()
+                    )
+
+                activations = np.asarray(
+                    activations,
+                    dtype=np.float64
+                ).reshape(-1)
+
+                # Remove invalid reference activations.
+                activations = activations[
+                    np.isfinite(activations)
+                ]
+
+                if activations.size == 0:
+                    continue
+
+                # One mean activation per neuron.
+                per_neuron_scores.append(
+                    float(np.mean(activations))
+                )
+
+            neuron_scores[str(layer)] = np.asarray(
+                per_neuron_scores,
+                dtype=np.float64
+            )
+
+    else:
+        raise ValueError(
+            "Unsupported cache format. Expected .npz or .pt."
+        )
+
+    if not neuron_scores:
+        raise ValueError("Activation cache contains no layers.")
+
+    # --------------------------------------------------
+    # Statistics
+    # --------------------------------------------------
     statistics = {}
-    print(f"\n{'=' * 72}\nCached activation-score statistics\n{'=' * 72}")
+    valid_scores = {}
+
     print(
-        "Each value is one neuron's mean activation over its "
-        f"top {N_SAMPLES} cached references."
+        f"\n{'=' * 72}\n"
+        "Cached activation-score statistics\n"
+        f"{'=' * 72}"
     )
-    for layer_index, layer in enumerate(layer_names):
-        values = neuron_scores[layer_index]
+
+    print(
+        "Each value represents one neuron's mean "
+        "activation over its cached top references."
+    )
+
+    for layer, scores in neuron_scores.items():
+
+        values = np.asarray(
+            scores, dtype=np.float64
+        ).reshape(-1)
+
         values = values[np.isfinite(values)]
+        valid_scores[layer] = values
+
         neuron_count = int(values.size)
-        layer_stats = {
-            "mean": float(np.mean(values)),
-            "min": float(np.min(values)),
-            "max": float(np.max(values)),
-            "neuron_count": neuron_count,
-        }
+
+        if neuron_count == 0:
+            layer_stats = {
+                "mean": float("nan"),
+                "min": float("nan"),
+                "max": float("nan"),
+                "neuron_count": 0,
+            }
+        else:
+            layer_stats = {
+                "mean": float(np.mean(values)),
+                "min": float(np.min(values)),
+                "max": float(np.max(values)),
+                "neuron_count": neuron_count,
+            }
+
         statistics[layer] = layer_stats
+
         print(
-            f"{layer}: n={layer_stats['neuron_count']}, "
+            f"{layer}: "
+            f"n={neuron_count}, "
             f"mean={layer_stats['mean']:.6g}, "
             f"min={layer_stats['min']:.6g}, "
             f"max={layer_stats['max']:.6g}"
         )
 
-    csv_path = output_dir / "activation_score_statistics_per_layer.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as stream:
+    # --------------------------------------------------
+    # Save CSV
+    # --------------------------------------------------
+    csv_path = (
+        output_dir /
+        "activation_score_statistics_per_layer.csv"
+    )
+
+    with csv_path.open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+
         writer = csv.writer(stream)
-        writer.writerow(["layer", "neuron_count", "mean", "min", "max"])
-        for layer, values in statistics.items():
+
+        writer.writerow([
+            "layer",
+            "neuron_count",
+            "mean",
+            "min",
+            "max",
+        ])
+
+        for layer, stats in statistics.items():
             writer.writerow([
-                layer, values["neuron_count"], values["mean"],
-                values["min"], values["max"],
+                layer,
+                stats["neuron_count"],
+                stats["mean"],
+                stats["min"],
+                stats["max"],
             ])
+
+    # --------------------------------------------------
+    # Plot histograms
+    # --------------------------------------------------
+    layer_names = list(valid_scores.keys())
 
     panels = len(layer_names) + 1
     columns = min(4, panels)
     rows = math.ceil(panels / columns)
+
     figure, axes = plt.subplots(
-        rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False
+        rows,
+        columns,
+        figsize=(5 * columns, 3.5 * rows),
+        squeeze=False,
     )
-    axes = axes.reshape(-1)
-    for layer_index, (axis, layer) in enumerate(zip(axes, layer_names)):
-        values = neuron_scores[layer_index]
-        values = values[np.isfinite(values)]
-        axis.hist(values, bins=bins)
-        axis.axvline(values.mean(), color="red", linestyle="--", linewidth=1,
-                     label=f"mean={values.mean():.3g}")
-        axis.set(title=layer, xlabel="Mean top-reference activation", ylabel="Neurons")
-        axis.legend(fontsize=8)
-    if activation_cache_path.split(".")[-1] == "npz":
-        all_values = neuron_scores[np.isfinite(neuron_scores)]
+
+    axes = axes.flatten()
+
+    for i, layer in enumerate(layer_names):
+
+        axis = axes[i]
+        values = valid_scores[layer]
+
+        if values.size == 0:
+            axis.text(
+                0.5, 0.5,
+                "No valid activations",
+                ha="center",
+                va="center",
+                transform=axis.transAxes,
+            )
+        else:
+            axis.hist(values, bins=bins)
+
+            mean_value = float(values.mean())
+
+            axis.axvline(
+                mean_value,
+                color="red",
+                linestyle="--",
+                linewidth=1,
+                label=f"mean={mean_value:.3g}",
+            )
+
+            axis.legend(fontsize=8)
+
+        axis.set(
+            title=layer,
+            xlabel="Mean top-reference activation",
+            ylabel="Neurons",
+        )
+
+    # --------------------------------------------------
+    # Overall histogram
+    # --------------------------------------------------
+    nonempty_scores = [
+        values
+        for values in valid_scores.values()
+        if values.size > 0
+    ]
+
+    if nonempty_scores:
+        all_values = np.concatenate(nonempty_scores)
     else:
-        all_values = np.concatenate(neuron_scores)
-        all_values = all_values[np.isfinite(all_values)]
+        all_values = np.array([], dtype=np.float64)
+
     overall = axes[len(layer_names)]
-    overall.hist(all_values, bins=bins)
-    overall.axvline(all_values.mean(), color="red", linestyle="--", linewidth=1,
-                    label=f"mean={all_values.mean():.3g}")
-    overall.set(title="All visual MLP layers", xlabel="Mean top-reference activation",
-                ylabel="Neurons")
-    overall.legend(fontsize=8)
+
+    if all_values.size > 0:
+
+        overall.hist(all_values, bins=bins)
+
+        overall_mean = float(all_values.mean())
+
+        overall.axvline(
+            overall_mean,
+            color="red",
+            linestyle="--",
+            linewidth=1,
+            label=f"mean={overall_mean:.3g}",
+        )
+
+        overall.legend(fontsize=8)
+
+    else:
+        overall.text(
+            0.5, 0.5,
+            "No valid activations",
+            ha="center",
+            va="center",
+            transform=overall.transAxes,
+        )
+
+    overall.set(
+        title="All visual MLP layers",
+        xlabel="Mean top-reference activation",
+        ylabel="Neurons",
+    )
+
     for axis in axes[panels:]:
         axis.axis("off")
-    figure.suptitle("Cached neuron activation-score distributions")
+
+    figure.suptitle(
+        "Cached neuron activation-score distributions"
+    )
+
     figure.tight_layout(rect=(0, 0, 1, 0.97))
-    plot_path = output_dir / "activation_score_distributions_per_layer.png"
-    figure.savefig(plot_path, dpi=170, bbox_inches="tight")
+
+    plot_path = (
+        output_dir /
+        "activation_score_distributions_per_layer.png"
+    )
+
+    figure.savefig(
+        plot_path,
+        dpi=170,
+        bbox_inches="tight",
+    )
+
     plt.show()
     plt.close(figure)
+
     print(f"Saved activation statistics to {csv_path}")
     print(f"Saved activation distributions to {plot_path}")
+
     return statistics
+
 
 # Polysemanticity score distribution
 def report_polysem(
