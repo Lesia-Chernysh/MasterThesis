@@ -1,3 +1,4 @@
+import timm
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -11,7 +12,7 @@ import torch
 from PIL import Image
 
 
-class AbstractDINO(ABC):
+class AbstractVisionModel(ABC):
     """
     Abstract base class for DINO-family vision models.
 
@@ -81,7 +82,7 @@ class AbstractDINO(ABC):
         pass
 
 
-class DINOv2(AbstractDINO):
+class DINOv2(AbstractVisionModel):
     """
     DINOv2 vision foundation model implementation.
 
@@ -199,3 +200,139 @@ class DINOv2(AbstractDINO):
         )
 
         return inputs["pixel_values"].to(self.device)
+
+
+class ConvNeXt(AbstractVisionModel):
+    """
+    ConvNeXt vision foundation model implementation.
+
+    Extracts image embeddings by pooling and concatenating
+    intermediate convolutional feature maps.
+
+    Parameters
+    ----------
+    url : str
+        Model identifier from the timm model registry.
+    device : str, optional
+        Device on which to run the model.
+    stages : tuple[int], optional
+        Indices of feature extraction stages (zero-based).
+    pooling : str, optional
+        Pooling strategy: "mean", "mean_std", or "spatial".
+    grid_size : int, optional
+        Spatial grid size used for spatial pooling.
+    normalize : bool, optional
+        Whether to L2-normalize embeddings.
+    **kwargs
+        Additional arguments passed to timm.create_model.
+    """
+
+    def __init__(
+        self,
+        url="convnext_tiny.in12k",
+        device="cpu",
+        stages=(0, 1, 2),
+        pooling="mean_std",
+        grid_size=2,
+        normalize=True,
+        **kwargs,
+    ):
+        super().__init__(url=url, device=device)
+
+        if pooling not in ("mean", "mean_std", "spatial"):
+            raise ValueError(f"Unsupported pooling: {pooling}")
+
+        self.model = timm.create_model(
+            url,
+            pretrained=True,
+            features_only=True,
+            out_indices=stages,
+            **kwargs,
+        ).eval().to(device)
+
+        config = timm.data.resolve_model_data_config(self.model)
+
+        self.preprocessor = timm.data.create_transform(
+            **config,
+            is_training=False,
+        )
+
+        self.stages = stages
+        self.pooling = pooling
+        self.grid_size = grid_size
+        self.normalize = normalize
+
+    @property
+    def embedding_dim(self):
+        """Return the number of embedding dimensions."""
+        channels = sum(self.model.feature_info.channels())
+
+        if self.pooling == "mean_std":
+            return channels * 2
+
+        if self.pooling == "spatial":
+            return channels * self.grid_size ** 2
+
+        return channels
+
+    def pool_features(self, feature: torch.Tensor):
+        """Convert a feature map into an embedding."""
+
+        if self.pooling == "mean":
+            return feature.mean(dim=(2, 3))
+
+        if self.pooling == "mean_std":
+            mean = feature.mean(dim=(2, 3))
+            std = feature.std(dim=(2, 3), unbiased=False)
+
+            return torch.cat([mean, std], dim=-1)
+
+        if self.pooling == "spatial":
+            pooled = F.adaptive_avg_pool2d(
+                feature,
+                (self.grid_size, self.grid_size),
+            )
+            return pooled.flatten(start_dim=1)
+
+    @torch.no_grad()
+    def encode_image(self, img: torch.Tensor):
+        """
+        Encode preprocessed images into feature vectors.
+
+        Input shape: (B, C, H, W).
+        Output shape: (B, D).
+        """
+        features = self.model(img)
+
+        embeddings = []
+
+        for feature in features:
+            embedding = self.pool_features(feature)
+
+            if self.normalize:
+                embedding = F.normalize(embedding, dim=-1)
+
+            embeddings.append(embedding)
+
+        embedding = torch.cat(embeddings, dim=-1)
+
+        if self.normalize:
+            embedding = F.normalize(embedding, dim=-1)
+
+        return embedding
+
+    def preprocess(
+        self,
+        img: Image.Image | list[Image.Image],
+    ) -> torch.Tensor:
+        """Preprocess images and move them to the model device."""
+
+        if not isinstance(img, list):
+            img = [img]
+
+        inputs = torch.stack([
+            self.preprocessor(image.convert("RGB"))
+            for image in img
+        ])
+
+        return inputs.to(self.device)
