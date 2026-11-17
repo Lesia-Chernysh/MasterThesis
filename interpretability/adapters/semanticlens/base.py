@@ -52,6 +52,35 @@ class SemanticLensAdapter(ABC):
         Construct the arguments required by model.forward().
         """
 
+    def prepare_loader_batch(
+            self,
+            batch,
+            device: torch.device | str,
+    ) -> PreparedBatch:
+        """
+        Default handling for datasets returning:
+
+            images
+            (images, labels)
+            (images, other_metadata)
+
+        Model-specific adapters can override this method when they need
+        additional dataset fields.
+        """
+
+        if isinstance(batch, dict):
+            images = batch["image"]
+        elif isinstance(batch, (tuple, list)):
+            images = batch[0]
+        else:
+            images = batch
+
+        return self.prepare_batch(
+            images=images,
+            device=device,
+        )
+
+    
     def forward(
         self,
         model,

@@ -664,16 +664,14 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         with self.actmax_cache.hook_context(
                 self.model
         ):
-            for images, _ in tqdm(
+            for batch in tqdm(
                     dataloader,
                     total=len(dataloader),
                     desc="Collecting ActMax",
             ):
-                prepared_batch = (
-                    self.adapter.prepare_batch(
-                        images,
-                        self.device,
-                    )
+                prepared_batch = self.adapter.prepare_loader_batch(
+                    batch,
+                    self.device,
                 )
 
                 self.actmax_cache.set_current_batch(
