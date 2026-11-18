@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.utils.data import default_collate
 
 
 @dataclass
