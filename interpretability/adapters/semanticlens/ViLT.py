@@ -4,6 +4,8 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from transformers import ViltProcessor
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms.functional import resize
 
 from interpretability.adapters.semanticlens.base import (
     PreparedBatch,
@@ -183,10 +185,13 @@ class ViLTAdapter(SemanticLensAdapter):
         )
 
     @staticmethod
-    def _prepare_images(images) -> list:
+    def _prepare_images(self, images) -> list:
         """
-        ViltProcessor should receive CPU tensors, PIL images, or NumPy
-        arrays—not CUDA tensors.
+        Resize every image to a fixed square.
+
+        This guarantees a constant ViLT patch grid:
+            384 / 32 = 12
+            -> 12 x 12 patches
         """
 
         if isinstance(images, torch.Tensor):
@@ -195,27 +200,57 @@ class ViLTAdapter(SemanticLensAdapter):
 
             if images.ndim != 4:
                 raise ValueError(
-                    "Expected images with shape [B, C, H, W], "
-                    f"got {tuple(images.shape)}"
+                    "Expected [B, C, H, W], got "
+                    f"{tuple(images.shape)}"
                 )
 
-            return [
+            images = [
                 image.detach().cpu()
                 for image in images
             ]
 
-        if isinstance(images, Sequence):
-            return [
-                image.detach().cpu()
-                if isinstance(image, torch.Tensor)
-                else image
-                for image in images
-            ]
+        elif isinstance(images, Sequence):
+            images = list(images)
 
-        raise TypeError(
-            "Expected a batched tensor or a sequence of "
-            f"images, got {type(images)!r}"
-        )
+        else:
+            raise TypeError(
+                "Expected a batched tensor or a sequence "
+                f"of images, got {type(images)!r}"
+            )
+
+        prepared_images = []
+
+        for image in images:
+            if isinstance(image, torch.Tensor):
+                image = image.detach().cpu()
+
+                # ViltProcessor expects float tensors in [0, 1].
+                if image.is_floating_point():
+                    min_value = float(image.min())
+                    max_value = float(image.max())
+
+                    if min_value < 0 or max_value > 1:
+                        raise ValueError(
+                            "ViLT received an already-normalized "
+                            "image tensor with range "
+                            f"[{min_value}, {max_value}]. "
+                            "Remove Normalize from the dataset "
+                            "transform."
+                        )
+
+            image = resize(
+                image,
+                size=[
+                    self.image_size,
+                    self.image_size,
+                ],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            )
+
+            prepared_images.append(image)
+
+        return prepared_images
 
     def _prepare_questions(
         self,
