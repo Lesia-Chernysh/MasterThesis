@@ -184,7 +184,7 @@ class ViLTAdapter(SemanticLensAdapter):
             kwargs=dict(encoding),
         )
 
-    @staticmethod
+
     def _prepare_images(self, images) -> list:
         """
         Resize every image to a fixed square.
