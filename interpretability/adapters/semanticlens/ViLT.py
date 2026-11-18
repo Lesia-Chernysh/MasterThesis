@@ -17,13 +17,10 @@ from interpretability.adapters.semanticlens.base import (
 class ViLTAdapter(SemanticLensAdapter):
     def __init__(
         self,
-        processor: ViltProcessor | None = None,
-        model_name: str = (
-            "dandelin/vilt-b32-finetuned-vqa"
-        ),
-        default_question: str = (
-            "what is on the image?"
-        ),
+        processor=None,
+        model_name="dandelin/vilt-b32-finetuned-vqa",
+        default_question="What is on the image?",
+        image_size=384,
     ):
         self.processor = (
             processor
@@ -34,6 +31,8 @@ class ViLTAdapter(SemanticLensAdapter):
         )
 
         self.default_question = default_question
+        self.image_size = image_size
+
 
     def collate_fn(self, batch):
         """
