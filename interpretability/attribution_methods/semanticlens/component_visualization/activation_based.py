@@ -659,6 +659,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
+            collate_fn=self.adapter.collate_fn,
         )
 
         with self.actmax_cache.hook_context(

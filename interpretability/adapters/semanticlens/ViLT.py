@@ -33,6 +33,48 @@ class ViLTAdapter(SemanticLensAdapter):
 
         self.default_question = default_question
 
+    def collate_fn(self, batch):
+        """
+        Preserve images as a list.
+
+        This allows ViltProcessor to receive PIL images of different
+        dimensions instead of asking PyTorch to stack them.
+        """
+
+        if not batch:
+            raise ValueError("Cannot collate an empty batch")
+
+        first_sample = batch[0]
+
+        if isinstance(first_sample, dict):
+            images = [
+                sample["image"]
+                for sample in batch
+            ]
+
+            questions = [
+                sample.get("question")
+                for sample in batch
+            ]
+
+            return images, questions
+
+        if isinstance(first_sample, (tuple, list)):
+            images = [
+                sample[0]
+                for sample in batch
+            ]
+
+            additional_values = [
+                sample[1]
+                for sample in batch
+            ]
+
+            return images, additional_values
+
+        # Dataset returns images without labels/questions.
+        return list(batch)
+
     def prepare_loader_batch(
         self,
         batch,

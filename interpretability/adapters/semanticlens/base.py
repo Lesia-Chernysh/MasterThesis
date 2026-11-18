@@ -42,6 +42,13 @@ class SemanticLensAdapter(ABC):
     Interface between SemanticLens and a particular model family.
     """
 
+    def collate_fn(self, batch):
+        """
+        Default PyTorch collation for models whose datasets return
+        tensors that can be stacked.
+        """
+        return default_collate(batch)
+
     @abstractmethod
     def prepare_batch(
         self,
