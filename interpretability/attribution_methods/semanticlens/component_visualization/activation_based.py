@@ -692,7 +692,6 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             for batch_idx, batch in enumerate(tqdm(
                     dataloader,
                     total=len(dataloader),
-                    start=1,
                     desc="Collecting ActMax",
             )):
                 prepared_batch = self.adapter.prepare_loader_batch(
