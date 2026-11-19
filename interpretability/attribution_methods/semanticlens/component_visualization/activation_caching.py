@@ -40,7 +40,7 @@ Workflow Example
 """
 
 from __future__ import annotations
-
+import ast
 import inspect
 import logging
 from collections import Counter, OrderedDict
@@ -52,6 +52,8 @@ from typing import Any
 import safetensors
 import safetensors.torch
 import torch
+import os
+import re
 
 from adapters.semanticlens.base import PreparedBatch
 
@@ -881,6 +883,187 @@ class CustomActMaxCache(ActMaxCache):
             for layer_name in layer_names
         }
 
+    @staticmethod
+    def _safe_layer_name(layer_name: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", layer_name)
+
+    def _store_tensors_atomic(
+        self,
+        tensors: dict[str, torch.Tensor],
+        file_path: Path,
+        metadata: dict[str, str],
+    ) -> None:
+        """
+        Write a complete temporary file and then atomically replace
+        the previous checkpoint.
+        """
+        file_path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        tmp_path = file_path.with_name(
+            file_path.name + ".tmp"
+        )
+
+        cpu_tensors = {
+            name: tensor.detach().cpu().contiguous()
+            for name, tensor in tensors.items()
+        }
+
+        try:
+            safetensors.torch.save_file(
+                cpu_tensors,
+                tmp_path,
+                metadata=metadata,
+            )
+
+            os.replace(
+                tmp_path,
+                file_path,
+            )
+        finally:
+            # Clean up if save_file() or os.replace() failed.
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def store_checkpoint(
+        self,
+        directory: Path | str,
+        *,
+        neuron_chunk_size: int | None = None,
+    ) -> None:
+        """
+        Store the current CustomActMax cache.
+
+        Parameters
+        ----------
+        directory:
+            Destination checkpoint directory.
+
+        neuron_chunk_size:
+            None writes one file per layer.
+
+            A positive integer, for example 100, writes one file per
+            group of that many neurons.
+        """
+        if (
+            neuron_chunk_size is not None
+            and neuron_chunk_size <= 0
+        ):
+            raise ValueError(
+                "neuron_chunk_size must be positive or None"
+            )
+
+        directory = Path(directory)
+        directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        for layer_name, act_max in self.cache.items():
+            if not act_max.is_setup:
+                logger.warning(
+                    "Skipping checkpoint for layer '%s' because "
+                    "it has no data.",
+                    layer_name,
+                )
+                continue
+
+            safe_name = self._safe_layer_name(
+                layer_name
+            )
+            n_latents = int(act_max.n_latents)
+
+            base_metadata = {
+                "model_name": self.model_name,
+                "aggregation_fn_name": self.agg_fn_name,
+                "n_collect": str(self.n_collect),
+                "n_latents": str(n_latents),
+                "n_all_latents": str(
+                    act_max.n_all_latents
+                ),
+                "layer_name": layer_name,
+                "samples_seen": str(
+                    self.sample_idx_counter[layer_name]
+                ),
+                "cache_type": "CustomActMax",
+            }
+
+            if neuron_chunk_size is None:
+                file_path = directory / (
+                    f"{safe_name}."
+                    f"{self.agg_fn_name}."
+                    f"safetensors"
+                )
+
+                self._store_tensors_atomic(
+                    tensors={
+                        "activations": (
+                            act_max.activations
+                        ),
+                        "sample_ids": (
+                            act_max.sample_ids
+                        ),
+                        "not_aggr_activations": (
+                            act_max.activations_not_aggr
+                        ),
+                    },
+                    file_path=file_path,
+                    metadata={
+                        **base_metadata,
+                        "neuron_start": "0",
+                        "neuron_end": str(n_latents),
+                    },
+                )
+
+                continue
+
+            for start in range(
+                0,
+                n_latents,
+                neuron_chunk_size,
+            ):
+                end = min(
+                    start + neuron_chunk_size,
+                    n_latents,
+                )
+
+                metadata = {
+                    **base_metadata,
+                    "neuron_start": str(start),
+                    "neuron_end": str(end),
+                }
+
+                file_path = directory / (
+                    f"{safe_name}."
+                    f"{self.agg_fn_name}."
+                    f"neurons-{start:06d}-{end:06d}."
+                    f"safetensors"
+                )
+
+                self._store_tensors_atomic(
+                    tensors={
+                        "activations": (
+                            act_max.activations[start:end]
+                        ),
+                        "sample_ids": (
+                            act_max.sample_ids[start:end]
+                        ),
+                        "not_aggr_activations": (
+                            act_max
+                            .activations_not_aggr[start:end]
+                        ),
+                    },
+                    file_path=file_path,
+                    metadata=metadata,
+                )
+
+        logger.info(
+            "Checkpoint saved successfully to %s",
+            directory,
+        )
+
     def set_current_batch( self, prepared_batch: PreparedBatch):
         self.current_batch = prepared_batch
 
@@ -962,76 +1145,468 @@ class CustomActMaxCache(ActMaxCache):
         logger.info(f"Cache saved successfully to {directory}")
 
     # change cache content to CustomActMax instance
-    def load(self, directory: Path | str):
+    def load(
+            self,
+            directory: Path | str,
+    ) -> None:
         """
-        Load data into this cache instance from a directory.
+        Load CustomActMax data from checkpoint files.
 
-        This method will only load files that match the instance's configured
-        aggregation function and `n_collect` value.
+        Supported layouts
+        -----------------
+        Unsharded checkpoint:
+            {layer}.{aggregation_fn}.safetensors
 
-        Parameters
-        ----------
-        directory : Path or str
-            The directory containing the `.safetensors` files.
+        Sharded checkpoint:
+            {layer}.{aggregation_fn}.
+            neurons-{start}-{end}.safetensors
 
-        Raises
-        ------
-        FileNotFoundError
-            If the directory does not exist.
-        ValueError
-            If no matching cache files are found or if file metadata doesn't match.
+        Legacy file:
+            {aggregation_fn}-{n_collect}-{layer}.safetensors
+
+        Sharded tensors are concatenated along the neuron dimension.
+        The sample counter is restored from the `samples_seen`
+        checkpoint metadata.
         """
-        # TODO: add a possible dir ActMax cache. Make sure, the info is compatible. Write a special reader for it
         directory = Path(directory)
 
         if not directory.is_dir():
-            raise FileNotFoundError(f"Cache directory not found: {directory}")
-
-        expected_agg_fn_name = self.aggregation_fn.__name__
-        logger.info(f"Loading cache for aggregation fn: '{expected_agg_fn_name}'")
+            raise FileNotFoundError(
+                f"Cache directory not found: {directory}"
+            )
 
         loaded_count = 0
+
         for layer_name in self.layer_names:
-            metadata = {
-                "model_name": self.model_name,
-                "aggregation_fn_name": self.agg_fn_name,
-                "n_collect": str(self.n_collect),
-                "layer_name": layer_name
-            }
-            # CHANGED: Filename now includes the aggregation function name to prevent overwrites.
-            fname = "-".join([str(v) for k, v in metadata.items() if k not in ["model_name", "n_latents", "n_all_latents"]]) + ".safetensors"
+            safe_layer_name = self._safe_layer_name(
+                layer_name
+            )
 
-            #fname = "-".join([str(v) for k, v in metadata.items()]) + ".safetensors"
+            unsharded_path = directory / (
+                f"{safe_layer_name}."
+                f"{self.agg_fn_name}."
+                f"safetensors"
+            )
 
-            fpath = directory / fname
+            shard_pattern = (
+                f"{safe_layer_name}."
+                f"{self.agg_fn_name}."
+                f"neurons-*-*.safetensors"
+            )
 
-            if not fpath.exists():
-                logger.warning(f"File not found for layer '{layer_name}': {fpath}")
-                raise FileNotFoundError(f"Expected file not found: {fpath}")
+            shard_paths = list(
+                directory.glob(shard_pattern)
+            )
 
-            try:
-                with safetensors.safe_open(fpath, framework="pt") as f:
-                    metadata = f.metadata()
+            # Preserve compatibility with files written by the
+            # existing CustomActMaxCache.store() method.
+            legacy_path = directory / (
+                f"{self.agg_fn_name}-"
+                f"{self.n_collect}-"
+                f"{layer_name}."
+                f"safetensors"
+            )
 
-                    if metadata.get("aggregation_fn_name") != expected_agg_fn_name:
+            if unsharded_path.exists():
+                checkpoint_paths = [
+                    unsharded_path
+                ]
+                is_sharded = False
+
+            elif shard_paths:
+                checkpoint_paths = shard_paths
+                is_sharded = True
+
+            elif legacy_path.exists():
+                checkpoint_paths = [
+                    legacy_path
+                ]
+                is_sharded = False
+
+            else:
+                raise FileNotFoundError(
+                    "No checkpoint found for layer "
+                    f"'{layer_name}' in {directory}. "
+                    f"Expected '{unsharded_path.name}' or "
+                    f"files matching '{shard_pattern}'."
+                )
+
+            shard_records = []
+
+            for checkpoint_path in checkpoint_paths:
+                with safetensors.safe_open(
+                        checkpoint_path,
+                        framework="pt",
+                ) as file:
+                    metadata = file.metadata()
+
+                    if metadata is None:
                         raise ValueError(
-                            f"Mismatch in aggregation function for layer '{layer_name}'. "
-                            f"Expected '{expected_agg_fn_name}', but file has '{metadata.get('aggregation_fn_name')}'."
+                            "Checkpoint has no metadata: "
+                            f"{checkpoint_path}"
                         )
-                    if int(metadata.get("n_collect")) != self.n_collect:
-                        raise ValueError(
-                            f"Mismatch in n_collect for layer '{layer_name}'. "
-                            f"Expected '{self.n_collect}', but file has '{metadata.get('n_collect')}'."
-                        )
-            except ValueError as e:
-                logger.warning(f"Validation failed for layer '{layer_name}': {e}")
-                raise FileNotFoundError(f"Expected file not found: {fpath}")
 
-            # If validation passes, load the data.
-            self.cache[layer_name] = CustomActMax.load(fpath)
+                    tensor_names = set(file.keys())
+
+                    required_tensors = {
+                        "activations",
+                        "sample_ids",
+                        "not_aggr_activations",
+                    }
+
+                    missing_tensors = (
+                            required_tensors - tensor_names
+                    )
+
+                    if missing_tensors:
+                        raise ValueError(
+                            f"Checkpoint {checkpoint_path} "
+                            "is missing tensors: "
+                            f"{sorted(missing_tensors)}"
+                        )
+
+                    aggregation_name = metadata.get(
+                        "aggregation_fn_name"
+                    )
+
+                    if (
+                            aggregation_name
+                            != self.agg_fn_name
+                    ):
+                        raise ValueError(
+                            "Aggregation function mismatch in "
+                            f"{checkpoint_path}: expected "
+                            f"'{self.agg_fn_name}', got "
+                            f"'{aggregation_name}'."
+                        )
+
+                    checkpoint_n_collect = int(
+                        metadata["n_collect"]
+                    )
+
+                    if (
+                            checkpoint_n_collect
+                            != self.n_collect
+                    ):
+                        raise ValueError(
+                            f"n_collect mismatch in "
+                            f"{checkpoint_path}: expected "
+                            f"{self.n_collect}, got "
+                            f"{checkpoint_n_collect}."
+                        )
+
+                    checkpoint_layer = metadata.get(
+                        "layer_name"
+                    )
+
+                    if (
+                            checkpoint_layer is not None
+                            and checkpoint_layer != layer_name
+                    ):
+                        raise ValueError(
+                            f"Layer mismatch in "
+                            f"{checkpoint_path}: expected "
+                            f"'{layer_name}', got "
+                            f"'{checkpoint_layer}'."
+                        )
+
+                    checkpoint_model = metadata.get(
+                        "model_name"
+                    )
+
+                    if (
+                            checkpoint_model is not None
+                            and checkpoint_model
+                            != self.model_name
+                    ):
+                        raise ValueError(
+                            f"Model mismatch in "
+                            f"{checkpoint_path}: expected "
+                            f"'{self.model_name}', got "
+                            f"'{checkpoint_model}'."
+                        )
+
+                    activations = file.get_tensor(
+                        "activations"
+                    )
+
+                    sample_ids = file.get_tensor(
+                        "sample_ids"
+                    )
+
+                    activations_not_aggr = (
+                        file.get_tensor(
+                            "not_aggr_activations"
+                        )
+                    )
+
+                    # New checkpoints contain explicit ranges.
+                    # Legacy files do not, so infer their complete
+                    # range from the stored tensor.
+                    neuron_start = int(
+                        metadata.get(
+                            "neuron_start",
+                            0,
+                        )
+                    )
+
+                    neuron_end = int(
+                        metadata.get(
+                            "neuron_end",
+                            neuron_start
+                            + activations.shape[0],
+                        )
+                    )
+
+                    total_n_latents = int(
+                        metadata["n_latents"]
+                    )
+
+                    raw_n_all_latents = metadata.get(
+                        "n_all_latents"
+                    )
+
+                    if raw_n_all_latents is None:
+                        n_all_latents = list(
+                            activations_not_aggr.shape[2:]
+                        )
+                    else:
+                        n_all_latents = ast.literal_eval(
+                            raw_n_all_latents
+                        )
+
+                    samples_seen_raw = metadata.get(
+                        "samples_seen"
+                    )
+
+                    samples_seen = (
+                        int(samples_seen_raw)
+                        if samples_seen_raw is not None
+                        else None
+                    )
+
+                expected_shard_size = (
+                        neuron_end - neuron_start
+                )
+
+                if expected_shard_size <= 0:
+                    raise ValueError(
+                        "Invalid neuron range in "
+                        f"{checkpoint_path}: "
+                        f"[{neuron_start}, {neuron_end})."
+                    )
+
+                if (
+                        activations.shape[0]
+                        != expected_shard_size
+                ):
+                    raise ValueError(
+                        f"Neuron range in {checkpoint_path} "
+                        f"has size {expected_shard_size}, but "
+                        f"the activation tensor contains "
+                        f"{activations.shape[0]} neurons."
+                    )
+
+                if (
+                        sample_ids.shape[:2]
+                        != activations.shape[:2]
+                ):
+                    raise ValueError(
+                        "Activation and sample-ID shapes are "
+                        f"incompatible in {checkpoint_path}: "
+                        f"{tuple(activations.shape)} versus "
+                        f"{tuple(sample_ids.shape)}."
+                    )
+
+                if (
+                        activations_not_aggr.shape[:2]
+                        != activations.shape[:2]
+                ):
+                    raise ValueError(
+                        "Aggregated and unaggregated activation "
+                        f"shapes are incompatible in "
+                        f"{checkpoint_path}: "
+                        f"{tuple(activations.shape)} versus "
+                        f"{tuple(activations_not_aggr.shape)}."
+                    )
+
+                shard_records.append(
+                    {
+                        "path": checkpoint_path,
+                        "start": neuron_start,
+                        "end": neuron_end,
+                        "total_n_latents": (
+                            total_n_latents
+                        ),
+                        "n_all_latents": (
+                            list(n_all_latents)
+                        ),
+                        "samples_seen": samples_seen,
+                        "activations": activations,
+                        "sample_ids": sample_ids,
+                        "activations_not_aggr": (
+                            activations_not_aggr
+                        ),
+                    }
+                )
+
+            # Filename sorting is normally sufficient because the
+            # range is zero-padded, but metadata sorting is safer.
+            shard_records.sort(
+                key=lambda record: record["start"]
+            )
+
+            first_record = shard_records[0]
+
+            expected_n_latents = first_record[
+                "total_n_latents"
+            ]
+            expected_n_all_latents = first_record[
+                "n_all_latents"
+            ]
+            expected_samples_seen = first_record[
+                "samples_seen"
+            ]
+
+            expected_start = 0
+
+            for record in shard_records:
+                if record["start"] != expected_start:
+                    raise ValueError(
+                        "Missing or overlapping neuron shards "
+                        f"for layer '{layer_name}': expected "
+                        f"the next shard to start at "
+                        f"{expected_start}, but "
+                        f"{record['path'].name} starts at "
+                        f"{record['start']}."
+                    )
+
+                if (
+                        record["total_n_latents"]
+                        != expected_n_latents
+                ):
+                    raise ValueError(
+                        "Inconsistent n_latents metadata for "
+                        f"layer '{layer_name}'."
+                    )
+
+                if (
+                        record["n_all_latents"]
+                        != expected_n_all_latents
+                ):
+                    raise ValueError(
+                        "Inconsistent n_all_latents metadata "
+                        f"for layer '{layer_name}'."
+                    )
+
+                if (
+                        expected_samples_seen is not None
+                        and record["samples_seen"]
+                        != expected_samples_seen
+                ):
+                    raise ValueError(
+                        "Checkpoint shards for layer "
+                        f"'{layer_name}' were written at "
+                        "different processing positions."
+                    )
+
+                expected_start = record["end"]
+
+            if expected_start != expected_n_latents:
+                raise ValueError(
+                    f"Incomplete checkpoint for layer "
+                    f"'{layer_name}': loaded neurons "
+                    f"[0, {expected_start}), but expected "
+                    f"[0, {expected_n_latents})."
+                )
+
+            activations = torch.cat(
+                [
+                    record["activations"]
+                    for record in shard_records
+                ],
+                dim=0,
+            )
+
+            sample_ids = torch.cat(
+                [
+                    record["sample_ids"]
+                    for record in shard_records
+                ],
+                dim=0,
+            )
+
+            activations_not_aggr = torch.cat(
+                [
+                    record["activations_not_aggr"]
+                    for record in shard_records
+                ],
+                dim=0,
+            )
+
+            instance = CustomActMax(
+                model_name=self.model_name,
+                n_collect=self.n_collect,
+                n_latents=expected_n_latents,
+                n_all_latents=expected_n_all_latents,
+            )
+
+            instance.activations = (
+                activations.contiguous()
+            )
+            instance.sample_ids = (
+                sample_ids.contiguous()
+            )
+            instance.activations_not_aggr = (
+                activations_not_aggr.contiguous()
+            )
+            instance.is_setup = True
+
+            self.cache[layer_name] = instance
+
+            if expected_samples_seen is not None:
+                self.sample_idx_counter[
+                    layer_name
+                ] = expected_samples_seen
+            else:
+                # Legacy checkpoints have no samples_seen
+                # metadata. This is only an approximation because
+                # the top-k cache may not contain the latest ID.
+                valid_ids = sample_ids[
+                    sample_ids >= 0
+                    ]
+
+                self.sample_idx_counter[
+                    layer_name
+                ] = (
+                    int(valid_ids.max().item()) + 1
+                    if valid_ids.numel() > 0
+                    else 0
+                )
+
+                logger.warning(
+                    "Checkpoint for layer '%s' has no "
+                    "'samples_seen' metadata. The restored "
+                    "sample counter was inferred from retained "
+                    "top-k IDs and may be too small.",
+                    layer_name,
+                )
+
             loaded_count += 1
 
-        if loaded_count == 0:
-            logger.warning(f"No matching cache files were found and loaded from {directory}")
-        else:
-            logger.info(f"Successfully loaded data for {loaded_count} layer(s) from {directory}")
+            logger.info(
+                "Loaded layer '%s' from %d checkpoint "
+                "file(s)%s.",
+                layer_name,
+                len(shard_records),
+                " using neuron shards"
+                if is_sharded
+                else "",
+            )
+
+        logger.info(
+            "Successfully loaded checkpoints for %d layer(s) "
+            "from %s.",
+            loaded_count,
+            directory,
+        )

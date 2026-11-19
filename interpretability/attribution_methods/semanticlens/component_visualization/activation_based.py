@@ -662,14 +662,19 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             collate_fn=self.adapter.collate_fn,
         )
 
+        checkpoint_dir = Path("./actmax-checkpoint")
+        checkpoint_every = 50
+
+        self.actmax_cache.load("./actmax-checkpoint")
+
         with self.actmax_cache.hook_context(
                 self.model
         ):
-            for batch in tqdm(
+            for batch_idx, batch in enumerate(tqdm(
                     dataloader,
                     total=len(dataloader),
                     desc="Collecting ActMax",
-            ):
+            )):
                 prepared_batch = self.adapter.prepare_loader_batch(
                     batch,
                     self.device,
@@ -683,6 +688,18 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
                 self.adapter.forward(
                     self.model,
                     prepared_batch,
+                )
+
+                if batch_idx % checkpoint_every == 0:
+                    self.actmax_cache.store_checkpoint(
+                        checkpoint_dir,
+                        neuron_chunk_size=100,  # or None for one file per layer
+                    )
+
+        # Always save the final state.
+        self.actmax_cache.store_checkpoint(
+                    checkpoint_dir,
+                    neuron_chunk_size=100,
                 )
 
         self.actmax_cache.current_batch = None
@@ -984,6 +1001,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         # find the position of the sample's id in the cache.sample_ids (shape=[n_neurons, n_samples])
         img_pos = torch.where(self.actmax_cache.cache[layer].sample_ids[neuron_id] == sample) # in all dims
 
+        #print(f"img pos: {img_pos}")
         img_pos = int(img_pos[0]) # only in 0-th dim
 
         # Load raw image
@@ -1289,7 +1307,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
         embeds = []
 
-        for pil_list in loader:
+        for pil_list in tqdm(loader, desc="Encoding images"):
             inputs = fm.preprocess(pil_list)
             fm_out = fm.encode_image(inputs)
 
