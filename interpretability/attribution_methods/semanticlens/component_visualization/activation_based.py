@@ -665,7 +665,26 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         checkpoint_dir = Path("./actmax-checkpoint")
         checkpoint_every = 50
 
-        self.actmax_cache.load("./actmax-checkpoint")
+        checkpoint_files_exist = (
+                checkpoint_dir.is_dir()
+                and any(checkpoint_dir.glob("*.safetensors"))
+        )
+
+        if checkpoint_files_exist:
+            logger.info(
+                "Resuming ActMax cache from %s",
+                checkpoint_dir,
+            )
+
+            self.actmax_cache.load(
+                checkpoint_dir
+            )
+        else:
+            logger.info(
+                "No ActMax checkpoint found at %s; "
+                "starting from scratch.",
+                checkpoint_dir,
+            )
 
         with self.actmax_cache.hook_context(
                 self.model
@@ -673,6 +692,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             for batch_idx, batch in enumerate(tqdm(
                     dataloader,
                     total=len(dataloader),
+                    start=1,
                     desc="Collecting ActMax",
             )):
                 prepared_batch = self.adapter.prepare_loader_batch(
