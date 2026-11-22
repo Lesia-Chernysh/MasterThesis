@@ -50,6 +50,7 @@ import numpy as np
 class CropDataset(Dataset):
     def __init__(self, crop_db):
         self.crop_db = crop_db
+        print("NEEW CROPDATASET")
 
     def __len__(self):
         return len(self.crop_db)
