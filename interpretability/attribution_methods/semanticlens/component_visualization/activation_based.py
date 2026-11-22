@@ -400,8 +400,6 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
         dict
             Dictionary mapping layer names to embedded concept representations.
         """
-        self.run(batch_size=batch_size, **kwargs)
-
         embeds = self._embed_vision_dataset(fm, batch_size, **kwargs)
 
         concept_db = dict()
@@ -1308,8 +1306,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             self.crop_db = self.create_crop_db()
         return [restore_crop(el["image_path"], el["bbox"]) for el in self.crop_db]
 
-
-
+    @torch.inference_mode()
     def _embed_vision_dataset(self, fm, batch_size, top_k_refs, **kwargs):
         def pil_list_collate(batch):
             return list(batch)
@@ -1324,13 +1321,15 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             collate_fn=pil_list_collate
         )
 
+        fm.eval()
+
         embeds = []
 
         for pil_list in tqdm(loader, desc="Encoding images"):
             inputs = fm.preprocess(pil_list)
             fm_out = fm.encode_image(inputs)
 
-            embeds.append(fm_out)
+            embeds.append(fm_out.detach().cpu())
 
         embeds = torch.cat(embeds)
 
@@ -1350,7 +1349,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         """
         concept_db_path = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_refs_per_neuron/{EMBEDDING_MODEL}/concept_db/concept_db_{self.model_name}.pt"
         if os.path.exists(concept_db_path):
-            concept_db = torch.load(concept_db_path, map_location=torch.device(self.device))
+            concept_db = torch.load(concept_db_path, map_location="cpu")
 
             cached_layers = (
                 set(concept_db.keys())
@@ -1434,7 +1433,9 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
         for layer_name, info in self.top_k_max_samples.items():
             for neuron_id, _ in info.items():
-                concept_db[layer_name][neuron_id] = embeds[[self.neurons_crops_mapping[layer_name][neuron_id]]]
+                #concept_db[layer_name][neuron_id] = embeds[[self.neurons_crops_mapping[layer_name][neuron_id]]]
+                indices = self.neurons_crops_mapping[layer_name][neuron_id]
+                concept_db[layer_name][neuron_id] = embeds[indices]
 
         self.concept_db = concept_db
         concept_db_dir = f"{OUTPUTS}/embeddings/semanticlens/{N_SAMPLES}_refs_per_neuron/{EMBEDDING_MODEL}/concept_db"
