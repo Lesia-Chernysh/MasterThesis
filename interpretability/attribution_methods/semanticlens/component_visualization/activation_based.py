@@ -1327,7 +1327,6 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             num_workers=0
         )
 
-        fm.eval()
         embeds = []
 
         for pil_list in tqdm(loader, desc="Encoding images"):
