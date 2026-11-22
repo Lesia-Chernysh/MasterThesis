@@ -1307,68 +1307,43 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
         return [restore_crop(el["image_path"], el["bbox"]) for el in self.crop_db]
 
     @torch.inference_mode()
-    @torch.inference_mode()
-    def _embed_vision_dataset(self, fm, batch_size, top_k_refs, **kwargs):
-
-        import psutil
-        process = psutil.Process(os.getpid())
-
-        def log_memory(stage):
-            ram = process.memory_info().rss / 1024 ** 3
-            msg = f"[{stage}] RAM: {ram:.2f} GB"
-
-            if torch.cuda.is_available():
-                gpu = torch.cuda.memory_allocated() / 1024 ** 3
-                msg += f" | GPU: {gpu:.2f} GB"
-
-            print(msg, flush=True)
-
-        log_memory("START")
-
+    def _embed_vision_dataset(
+            self, fm, batch_size, top_k_refs, **kwargs
+    ):
         def pil_list_collate(batch):
             return list(batch)
 
         if self.crop_db is None:
-            log_memory("Before create_crop_db")
             self.crop_db = self.create_crop_db()
-            log_memory("After create_crop_db")
 
-        log_memory("Before create_crops_list")
-        crops = create_crops_list(self.crop_db)
-        log_memory("After create_crops_list")
+        # No longer restore all crops here!
+        dataset = CropDataset(self.crop_db)
 
-        print(f"Number of crops: {len(crops)}", flush=True)
-
-        log_memory("Before DataLoader")
         loader = DataLoader(
-            CropDataset(crops),
+            dataset,
             batch_size=batch_size,
             shuffle=False,
             collate_fn=pil_list_collate,
             num_workers=0
         )
-        log_memory("After DataLoader")
 
         fm.eval()
-        log_memory("After fm.eval")
-
         embeds = []
 
-        for i, pil_list in enumerate(tqdm(loader)):
-            print(f"Batch {i}: loaded", flush=True)
-            log_memory("Before preprocess")
-
+        for pil_list in tqdm(loader, desc="Encoding images"):
             inputs = fm.preprocess(pil_list)
-            log_memory("After preprocess")
 
             fm_out = fm.encode_image(inputs)
-            log_memory("After encode_image")
 
+            # Move embeddings to CPU
             embeds.append(fm_out.detach().cpu())
 
-            del inputs, fm_out
+            del inputs, fm_out, pil_list
 
-        embeds = torch.cat(embeds)
+        embeds = torch.cat(embeds, dim=0)
+
+        assert len(embeds) == len(dataset)
+
         return embeds
 
     # override it to save embeddings when computed and load them from a file, if it already exists

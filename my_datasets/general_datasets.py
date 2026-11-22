@@ -1,6 +1,7 @@
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from interpretability.attribution_methods.semanticlens.utils.helper import restore_crop
 
 class IndexedSampleDataset(Dataset):
     """
@@ -41,12 +42,20 @@ class IndexedSampleDataset(Dataset):
         )
 
 
-class CropDataset(torch.utils.data.Dataset):
-        def __init__(self, crops):
-            self.crops = crops
+class CropDataset(Dataset):
+    def __init__(self, crop_db):
+        self.crop_db = crop_db
 
-        def __len__(self):
-            return len(self.crops)
+    def __len__(self):
+        return len(self.crop_db)
 
-        def __getitem__(self, idx):
-            return Image.fromarray(self.crops[idx])
+    def __getitem__(self, idx):
+        el = self.crop_db[idx]
+
+        # Load only the requested crop
+        crop = restore_crop(
+            el["image_path"],
+            el["bbox"]
+        )
+
+        return crop
