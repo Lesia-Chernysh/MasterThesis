@@ -42,6 +42,11 @@ class IndexedSampleDataset(Dataset):
         )
 
 
+
+from torch.utils.data import Dataset
+from PIL import Image
+import numpy as np
+
 class CropDataset(Dataset):
     def __init__(self, crop_db):
         self.crop_db = crop_db
@@ -52,10 +57,14 @@ class CropDataset(Dataset):
     def __getitem__(self, idx):
         el = self.crop_db[idx]
 
-        # Load only the requested crop
         crop = restore_crop(
             el["image_path"],
             el["bbox"]
         )
 
+        # Convert NumPy array to PIL image
+        if isinstance(crop, np.ndarray):
+            crop = Image.fromarray(crop)
+
         return crop
+
