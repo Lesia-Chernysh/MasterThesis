@@ -1308,6 +1308,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
     @torch.inference_mode()
     def _embed_vision_dataset(self, fm, batch_size, top_k_refs, **kwargs):
+        print("NEEEEEEEEEEEEW embed")
         def pil_list_collate(batch):
             return list(batch)
 
