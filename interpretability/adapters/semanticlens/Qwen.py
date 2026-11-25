@@ -3,6 +3,8 @@ import copy
 import numpy as np
 import torch
 from transformers import AutoProcessor
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms.functional import resize
 
 from interpretability.adapters.semanticlens.base import (
     PreparedBatch,
@@ -39,6 +41,18 @@ class QwenAdapter(SemanticLensAdapter):
             questions=None,
     ) -> PreparedBatch:
 
+        def _prepare_images(self, images):
+            prepared_images = []
+
+            for image in images:
+                image = resize(
+                    image,
+                    [224, 224],
+                    interpolation=InterpolationMode.BICUBIC,
+                    antialias=True,
+                )
+                prepared_images.append(image)
+
         if questions is None:
             questions = [
                 self.prompt
@@ -53,6 +67,7 @@ class QwenAdapter(SemanticLensAdapter):
 
         conversations = []
 
+        images = _prepare_images(images)
         for image, question in zip(images, questions):
             conversation = {
                 "role": "user",
@@ -78,6 +93,21 @@ class QwenAdapter(SemanticLensAdapter):
             return_dict=True,
             return_tensors="pt",
         )
+
+        # Validate grids
+        grid_thw = inputs["image_grid_thw"]
+
+        expected = torch.tensor(
+            [1, 16, 16],
+            device=grid_thw.device,
+        )
+
+        if not torch.all(grid_thw == expected):
+            raise ValueError(
+                "Unexpected Qwen visual grid: "
+                f"{grid_thw.detach().cpu().tolist()}; "
+                "expected [1, 16, 16] for every image"
+            )
 
         # BatchEncoding supports .to(device).
         inputs = inputs.to(device)
