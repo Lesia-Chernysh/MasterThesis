@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 import torch
 from torch.utils.data import default_collate
+from PIL import Image
 
 
 @dataclass
@@ -45,9 +46,42 @@ class SemanticLensAdapter(ABC):
 
     def collate_fn(self, batch):
         """
-        Default PyTorch collation for models whose datasets return
-        tensors that can be stacked.
+        Use normal PyTorch collation for tensor datasets.
+
+        Preserve PIL images as lists for multimodal processors such
+        as ViLT and Qwen.
         """
+
+        if not batch:
+            raise ValueError("Cannot collate an empty batch")
+
+        first_sample = batch[0]
+
+        # Dataset returns only PIL images.
+        if isinstance(first_sample, Image.Image):
+            return list(batch)
+
+        # Dataset returns:
+        #     (PIL image, label/question/metadata)
+        if (
+            isinstance(first_sample, (tuple, list))
+            and len(first_sample) > 0
+            and isinstance(first_sample[0], Image.Image)
+        ):
+            fields = zip(*batch)
+
+            # Keep every field as a list. In VQACoco this becomes:
+            #
+            #   [
+            #       [PIL image, ...],
+            #       ["question", ...],
+            #   ]
+            return [
+                list(field)
+                for field in fields
+            ]
+
+        # Normal behavior for ResNet, ViT, VGG, etc.
         return default_collate(batch)
 
     @abstractmethod
