@@ -10,16 +10,16 @@ import itertools
 import inspect
 from tqdm import tqdm
 from zennit.composites import NameMapComposite, Composite
-from crp.attribution import CondAttribution
-from crp.maximization import Maximization
-from crp.concepts import Concept
-from crp.statistics import Statistics
-from crp.hooks import FeatVisHook
-from crp.helper import load_maximization, load_statistics, load_stat_targets
-from crp.image import vis_img_heatmap, vis_opaque_img
-from crp.cache import Cache
+from  interpretability.attribution_methods.crp.attribution import CondAttribution
+from interpretability.attribution_methods.crp.maximization import Maximization
+from interpretability.attribution_methods.crp.concepts import Concept
+from interpretability.attribution_methods.crp.statistics import Statistics
+from interpretability.attribution_methods.crp.hooks import FeatVisHook
+from interpretability.attribution_methods.crp.helper import load_maximization, load_statistics, load_stat_targets
+from interpretability.attribution_methods.crp.image import vis_img_heatmap, vis_opaque_img
+from interpretability.attribution_methods.crp.cache import Cache
 
-from attribution_methods.crp.visualization import FeatureVisualization
+from interpretability.attribution_methods.crp.visualization import FeatureVisualization
 
 
 class ViLTFeatureVisualization(FeatureVisualization):

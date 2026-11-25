@@ -9,15 +9,15 @@ import functools
 import inspect
 from tqdm import tqdm
 from zennit.composites import NameMapComposite, Composite
-from adapters.crp.CNNs_ViT.attribution import CondAttribution
-from attribution_methods.crp.maximization import Maximization
-from attribution_methods.crp.concepts import ChannelConcept, TransformerChannelConcept, Concept
-from attribution_methods.crp.statistics import Statistics
-from attribution_methods.crp.hooks import FeatVisHook
-from attribution_methods.crp.helper import load_maximization, load_statistics, load_stat_targets
-from attribution_methods.crp.image import vis_img_heatmap, vis_opaque_img
-from attribution_methods.crp.cache import Cache
-from attribution_methods.crp.visualization import FeatureVisualization
+from interpretability.adapters.crp.CNNs_ViT.attribution import CondAttribution
+from  interpretability.attribution_methods.crp.maximization import Maximization
+from  interpretability.attribution_methods.crp.concepts import ChannelConcept, TransformerChannelConcept, Concept
+from  interpretability.attribution_methods.crp.statistics import Statistics
+from  interpretability.attribution_methods.crp.hooks import FeatVisHook
+from  interpretability.attribution_methods.crp.helper import load_maximization, load_statistics, load_stat_targets
+from  interpretability.attribution_methods.crp.image import vis_img_heatmap, vis_opaque_img
+from  interpretability.attribution_methods.crp.cache import Cache
+from  interpretability.attribution_methods.crp.visualization import FeatureVisualization
 
 '''
         fv = PredictionFeatureVisualization(concept, attribution, imagenet_data, layer_map,
@@ -212,3 +212,43 @@ class FeatureVisualizationCNNsAdapter(FeatureVisualization):
 
         else:
             return data_batch.detach().cpu()
+
+
+
+    def _attribution_on_reference(self, data, concept_id: int, layer_name: str, composite, rf=False,
+                                  neuron_ids: list = [], batch_size=32):
+        # print("_attribution_on_reference")
+        # print("concept_id", concept_id)
+
+        n_samples = len(data)
+        if n_samples > batch_size:
+            batches = math.ceil(n_samples / batch_size)
+        else:
+            batches = 1
+            batch_size = n_samples
+
+        if rf and (len(neuron_ids) != n_samples):
+            raise ValueError("length of 'neuron_ids' must be equal to the length of 'data'")
+
+        heatmaps = []
+        for b in range(batches):
+            data_batch = data[b * batch_size: (b + 1) * batch_size].detach().requires_grad_()
+
+            if rf:
+                batch_neuron_ids = neuron_ids[
+                    b * batch_size: (b + 1) * batch_size
+                ]
+
+                conditions = [
+                    {layer_name: {concept_id: n_index}}
+                    for n_index in batch_neuron_ids
+                ]
+            else:
+                conditions = [{layer_name: [concept_id]}]
+                # initialize relevance with activation before non-linearity (could be changed in a future release)
+                attr = self.attribution(data_batch, conditions, composite, start_layer=layer_name,
+                                        on_device=self.device, exclude_parallel=False)
+
+            heatmaps.append(attr.heatmap)
+
+        return torch.cat(heatmaps, dim=0)

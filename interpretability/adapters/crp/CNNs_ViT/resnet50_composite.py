@@ -1,5 +1,5 @@
 from zennit.composites import EpsilonPlusFlat
-from resnet50_canonizer import PUREResNetCanonizer
+from interpretability.adapters.crp.CNNs_ViT.resnet50_canonizer import PUREResNetCanonizer
 
 def get_resnet50_composite():
     return EpsilonPlusFlat(

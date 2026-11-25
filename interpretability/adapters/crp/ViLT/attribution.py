@@ -1,8 +1,8 @@
 from zennit.composites import NameMapComposite
 from zennit.core import Composite
-from crp.hooks import MaskHook
-from crp.concepts import Concept, TransformerChannelConcept
-from crp.graph import ModelGraph
+from interpretability.attribution_methods.crp.hooks import MaskHook
+from interpretability.attribution_methods.crp.concepts import Concept, TransformerChannelConcept
+from interpretability.attribution_methods.crp.graph import ModelGraph
 from typing import Callable, List, Dict, Union, Tuple
 import torch
 import warnings
@@ -10,7 +10,7 @@ import numpy as np
 import math
 from tqdm import tqdm
 from collections import namedtuple
-from attribution_methods.crp.attribution import CondAttribution
+from interpretability.attribution_methods.crp.attribution import CondAttribution
 
 attrResult = namedtuple("AttributionResults", "heatmap, activations, relevances, prediction")
 attrGraphResult = namedtuple("AttributionGraphResults", "nodes, connections")
