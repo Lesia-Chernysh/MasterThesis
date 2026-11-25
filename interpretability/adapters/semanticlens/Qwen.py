@@ -67,7 +67,7 @@ class QwenAdapter(SemanticLensAdapter):
 
         conversations = []
 
-        images = _prepare_images(images)
+        images = self._prepare_images(images)
         for image, question in zip(images, questions):
             conversation = {
                 "role": "user",
