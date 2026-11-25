@@ -62,8 +62,13 @@ class FeatureVisualizationCNNsAdapter(FeatureVisualization):
         data_end: exclusively counted
         """
 
+        if data_end <= data_start:
+            raise ValueError("data_end must be greater than data_start.")
+        if batch_size <= 0 or checkpoint <= 0:
+            raise ValueError("batch_size and checkpoint must be positive integers.")
+
         self.saved_checkpoints = {"r_max": [], "a_max": [], "r_stats": [], "a_stats": []}
-        last_checkpoint = 0
+        last_checkpoint = data_start
 
         n_samples = data_end - data_start
         samples = np.arange(start=data_start, stop=data_end)
@@ -81,63 +86,56 @@ class FeatureVisualizationCNNsAdapter(FeatureVisualization):
             name_map.append(([l_name], hook))
         fv_composite = NameMapComposite(name_map)
 
-        if composite:
-            composite.register(self.attribution.model)
-        fv_composite.register(self.attribution.model)
-
         pbar = tqdm(total=batches, dynamic_ncols=True)
+        composite_registered = False
+        fv_registered = False
+        last_processed = data_start
+        try:
+            if composite:
+                composite.register(self.attribution.model)
+                composite_registered = True
+            fv_composite.register(self.attribution.model)
+            fv_registered = True
 
-        for b in range(batches):
+            for b in range(batches):
+                pbar.update(1)
+                samples_batch = samples[b * batch_size: (b + 1) * batch_size]
+                last_processed = int(samples_batch[-1]) + 1
+                data_batch, targets_samples = self.get_data_concurrently(samples_batch, preprocessing=True)
+                targets_samples = np.atleast_1d(np.asarray(targets_samples))
 
-            pbar.update(1)
+                data_broadcast, targets, sample_indices = [], [], []
+                try:
+                    for i_t, target in enumerate(targets_samples):
+                        for single_target in self.multitarget_to_single(target):
+                            targets.append(single_target)
+                            data_broadcast.append(data_batch[i_t])
+                            sample_indices.append(samples_batch[i_t])
+                    if not data_broadcast:
+                        continue
+                    data_broadcast = torch.stack(data_broadcast, dim=0)
+                    sample_indices = np.asarray(sample_indices)
+                    targets = np.asarray(targets)
+                except NotImplementedError:
+                    data_broadcast, targets, sample_indices = data_batch, targets_samples, samples_batch
 
-            samples_batch = samples[b * batch_size: (b + 1) * batch_size]
-            data_batch, targets_samples = self.get_data_concurrently(samples_batch, preprocessing=True)
-            # TODO: inputs are different. For ViLT it is DataBatch obj
-            targets_samples = np.array(targets_samples)  # numpy operation needed
+                conditions = [{self.attribution.MODEL_OUTPUT_NAME: [target]} for target in targets]
+                dict_inputs["sample_indices"] = sample_indices
+                dict_inputs["targets"] = targets
+                self.attribution(data_broadcast, conditions, None, exclude_parallel=False)
 
-            # TODO: for VLM, here is a handle for multitargets
+                if b % checkpoint == checkpoint - 1:
+                    self._save_results((last_checkpoint, last_processed))
+                    last_checkpoint = last_processed
 
-            # convert multi target to single target if user defined the method
-            data_broadcast, targets, sample_indices = [], [], []
-            try:
-                for i_t, target in enumerate(targets_samples):
-                    single_targets = self.multitarget_to_single(target)
-                    for st in single_targets:
-                        targets.append(st)
-                        data_broadcast.append(data_batch[i_t])
-                        sample_indices.append(samples_batch[i_t])
-                if len(data_broadcast) == 0:
-                    continue
-                # TODO: test stack
-                data_broadcast = torch.stack(data_broadcast, dim=0)
-                sample_indices = np.array(sample_indices)
-                targets = np.array(targets)
-
-            except NotImplementedError:
-                data_broadcast, targets, sample_indices = data_batch, targets_samples, samples_batch
-
-            conditions = [{self.attribution.MODEL_OUTPUT_NAME: [t]} for t in targets]
-            # dict_inputs is linked to FeatHooks
-            dict_inputs["sample_indices"] = sample_indices
-            dict_inputs["targets"] = targets
-            # TODO: vilt has add. forwards keys
-
-            # composites are already registered before
-            self.attribution(data_broadcast, conditions, None, exclude_parallel=False)
-
-            if b % checkpoint == checkpoint - 1:
-                self._save_results((last_checkpoint, sample_indices[-1] + 1))
-                last_checkpoint = sample_indices[-1] + 1
-
-        # TODO: what happens if result arrays are empty?
-        self._save_results((last_checkpoint, sample_indices[-1] + 1))
-
-        if composite:
-            composite.remove()
-        fv_composite.remove()
-
-        pbar.close()
+            if last_processed > last_checkpoint:
+                self._save_results((last_checkpoint, last_processed))
+        finally:
+            if fv_registered:
+                fv_composite.remove()
+            if composite_registered:
+                composite.remove()
+            pbar.close()
 
         return self.saved_checkpoints
 
@@ -176,7 +174,7 @@ class FeatureVisualizationCNNsAdapter(FeatureVisualization):
 
         if len(indices) == 1:
             data, label = self.get_data_sample(indices[0], preprocessing)
-            return data, label
+            return data, [label]
 
         threads = []
         data_returned = []
@@ -244,11 +242,20 @@ class FeatureVisualizationCNNsAdapter(FeatureVisualization):
                     {layer_name: {concept_id: n_index}}
                     for n_index in batch_neuron_ids
                 ]
+                mask_map = self.layer_map[layer_name].mask_rf
             else:
                 conditions = [{layer_name: [concept_id]}]
-                # initialize relevance with activation before non-linearity (could be changed in a future release)
-                attr = self.attribution(data_batch, conditions, composite, start_layer=layer_name,
-                                        on_device=self.device, exclude_parallel=False)
+                mask_map = self.layer_map[layer_name].mask
+
+            attr = self.attribution(
+                data_batch,
+                conditions,
+                composite,
+                mask_map=mask_map,
+                start_layer=layer_name,
+                on_device=self.device,
+                exclude_parallel=False,
+            )
 
             heatmaps.append(attr.heatmap)
 

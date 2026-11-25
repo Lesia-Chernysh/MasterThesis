@@ -1,19 +1,13 @@
 from zennit.composites import NameMapComposite
 from zennit.core import Composite
 from interpretability.attribution_methods.crp.hooks import MaskHook
-from interpretability.attribution_methods.crp.concepts import Concept, TransformerChannelConcept
-from interpretability.attribution_methods.crp.graph import ModelGraph
+from interpretability.attribution_methods.crp.concepts import TransformerChannelConcept
 from typing import Callable, List, Dict, Union, Tuple
 import torch
-import warnings
 import numpy as np
 import math
 from tqdm import tqdm
-from collections import namedtuple
-from interpretability.attribution_methods.crp.attribution import CondAttribution
-
-attrResult = namedtuple("AttributionResults", "heatmap, activations, relevances, prediction")
-attrGraphResult = namedtuple("AttributionGraphResults", "nodes, connections")
+from interpretability.attribution_methods.crp.attribution import CondAttribution, attrResult
 
 
 class CondAttributionViLTAdapter(CondAttribution):
@@ -46,48 +40,12 @@ class CondAttributionViLTAdapter(CondAttribution):
         return inputs, conditions, additional_forward_kwargs
 
     def _check_arguments(self, inputs, conditions, start_layer, exclude_parallel, init_rel):
-
-        if not all(i.requires_grad for i in inputs):
-            raise ValueError(
-                "requires_grad attribute of 'inputs' must be True.")
-
-        if self.overwrite_data_grad:
-            for i in inputs:
-                i.grad = None
-        elif any(i.grad is not None for i in inputs):
-            warnings.warn(
-                "'inputs' already has a filled .grad attribute. Set to None if not intended or set 'overwrite_grad' to True.")
-
-        distinct_cond = set()
-        for cond in conditions:
-            if self.MODEL_OUTPUT_NAME not in cond and start_layer is None and init_rel is None:
-                raise ValueError(
-                    f"Either {self.MODEL_OUTPUT_NAME} in 'conditions' or 'start_layer' or 'init_rel' must be defined.")
-
-            if self.MODEL_OUTPUT_NAME in cond and start_layer is not None:
-                warnings.warn(
-                    f"You defined a condition for {self.MODEL_OUTPUT_NAME} that has no effect, since the 'start_layer' {start_layer}"
-                    " is provided where the backward pass begins. If this behavior is not wished, remove 'start_layer'.")
-
-            if exclude_parallel:
-
-                if len(distinct_cond) == 0:
-                    distinct_cond.update(cond.keys())
-                elif distinct_cond ^ set(cond.keys()):
-                    raise ValueError(
-                        "If the 'exclude_parallel' flag is set to True, each condition dict must contain the"
-                        " same layer names. (This limitation does not apply to the __call__ method)")
+        return super()._check_arguments(inputs, conditions, start_layer, exclude_parallel, init_rel)
 
     def _register_mask_fn(self, hook, mask_map, b_index, c_indices, l_name, additional_forward_kwargs, rf):
-
-        if callable(mask_map):
-            mask_fn = mask_map(b_index, c_indices, l_name, additional_forward_kwargs, rf)
-        elif isinstance(mask_map, Dict):
-            mask_fn = mask_map[l_name](b_index, c_indices, l_name, additional_forward_kwargs, rf)
-        else:
-            raise ValueError("<mask_map> must be a dictionary or callable function.")
-
-        hook.fn_list.append(mask_fn)
+        return super()._register_mask_fn(
+            hook, mask_map, b_index, c_indices, l_name, additional_forward_kwargs, rf
+        )
 
     def __call__(
             self, inputs: Union[torch.Tensor, Tuple[torch.Tensor]], conditions: List[Dict[str, List]],
@@ -160,38 +118,7 @@ class CondAttributionViLTAdapter(CondAttribution):
                                    on_device, False, additional_forward_kwargs, rf)
 
     def _conditions_wrapper(self, *args):
-        """
-        Since 'exclude_parallel'=True requires that the condition set contains only the same layer names,
-        the list is divided into distinct lists that all contain the same layer name.
-        """
-
-        inputs, conditions = args[:2]
-
-        relevances, activations = {}, {}
-        heatmap, prediction = None, None
-
-        dist_conds = self._separate_conditions(conditions)
-
-        for dist_layer in dist_conds:
-
-            attr = self._attribute(inputs, dist_conds[dist_layer], *args[2:])
-
-            for l_name in attr.relevances:
-                if l_name not in relevances:
-                    relevances[l_name] = attr.relevances[l_name]
-                    activations[l_name] = attr.activations[l_name]
-                else:
-                    relevances[l_name] = torch.cat([relevances[l_name], attr.relevances[l_name]], dim=0)
-                    activations[l_name] = torch.cat([activations[l_name], attr.activations[l_name]], dim=0)
-
-            if heatmap is None:
-                heatmap = attr.heatmap
-                prediction = attr.prediction
-            else:
-                heatmap = tuple(torch.cat([h1, h2], dim=0) for h1, h2 in zip(heatmap, attr.heatmap))
-                prediction = torch.cat([prediction, attr.prediction], dim=0)
-        # print(f"heatmap: {heatmap}\n")
-        return attrResult(heatmap, activations, relevances, prediction)
+        return super()._conditions_wrapper(*args)
 
     def _attribute(
             self, inputs: Union[torch.Tensor, Tuple[torch.Tensor]], conditions: List[Dict[str, List]],
@@ -235,7 +162,7 @@ class CondAttributionViLTAdapter(CondAttribution):
 
         if composite is None:
             composite = Composite()
-        with mask_composite.context(self.model), composite.context(self.model) as modified:
+        with self._cleanup_handles(handles), mask_composite.context(self.model), composite.context(self.model) as modified:
 
             torch.manual_seed(self.seed)
             np.random.seed(self.seed)
@@ -260,7 +187,6 @@ class CondAttributionViLTAdapter(CondAttribution):
             # print("len out", len(layer_out))
             if len(layer_out) > 0:
                 activations, relevances = self._collect_hook_activation_relevance(layer_out, on_device)
-            [h.remove() for h in handles]
 
         # print(f"act: {activations}\nrel: {relevances}\npred: {pred}\n")
         return attrResult(attribution, activations, relevances, pred)
@@ -324,7 +250,7 @@ class CondAttributionViLTAdapter(CondAttribution):
             b.retain_grad()
         retain_graph = True
 
-        with mask_composite.context(self.model), composite.context(self.model) as modified:
+        with self._cleanup_handles(handles), mask_composite.context(self.model), composite.context(self.model) as modified:
 
             torch.manual_seed(self.seed)
             np.random.seed(self.seed)
@@ -378,8 +304,6 @@ class CondAttributionViLTAdapter(CondAttribution):
 
                 self._reset_gradients(inputs_batched)
                 [hook.fn_list.clear() for hook in hook_map.values()]
-
-        [h.remove() for h in handles]
 
         if verbose:
             pbar.close()

@@ -6,6 +6,7 @@ import torch
 import warnings
 import numpy as np
 from collections import namedtuple
+from contextlib import contextmanager
 
 attrResult = namedtuple("AttributionResults", "heatmap, activations, relevances, prediction")
 attrGraphResult = namedtuple("AttributionGraphResults", "nodes, connections")
@@ -32,7 +33,10 @@ class CondAttribution:
         self.MODEL_OUTPUT_NAME = "y"
 
         self.concept = concept
-        self.device = next(model.parameters()).device if device is None else device
+        if device is None:
+            parameter = next(model.parameters(), None)
+            device = parameter.device if parameter is not None else torch.device("cpu")
+        self.device = torch.device(device)
         self.model = model
         self.overwrite_data_grad = overwrite_data_grad
 
@@ -128,7 +132,7 @@ class CondAttribution:
         else:
             output_selection = prediction
 
-        if target_list:
+        if target_list is not None and len(target_list) > 0:
             mask = torch.zeros_like(output_selection)
             for i, targets in enumerate(target_list):
                 mask[i, targets] = output_selection[i, targets]
@@ -142,16 +146,73 @@ class CondAttribution:
     def broadcast(self, data, conditions, additional_forwad_kwargs=None) -> Tuple[torch.Tensor, Dict]:
         raise NotImplementedError
 
-    def _check_arguments(self, data, conditions, start_layer, exclude_parallel, init_rel):
-        raise NotImplementedError
+    @staticmethod
+    def _input_tensors(data):
+        """Return attribution inputs as a tuple without changing their structure."""
+        return data if isinstance(data, tuple) else (data,)
 
-    def _register_mask_fn(self, hook, mask_map, b_index, c_indices, l_name, **kwargs):
-        raise NotImplementedError
+    def _check_arguments(self, data, conditions, start_layer, exclude_parallel, init_rel):
+        """Validate arguments common to tensor and multimodal adapters."""
+        inputs = self._input_tensors(data)
+        if not inputs or not all(torch.is_tensor(value) for value in inputs):
+            raise TypeError("Attribution inputs must be a tensor or a non-empty tuple of tensors.")
+        if not all(value.requires_grad for value in inputs):
+            raise ValueError("requires_grad must be True for every attribution input.")
+        if not conditions:
+            raise ValueError("conditions must contain at least one condition dictionary.")
+
+        if self.overwrite_data_grad:
+            for value in inputs:
+                value.grad = None
+        elif any(value.grad is not None for value in inputs):
+            warnings.warn(
+                "Attribution inputs already contain gradients. Set them to None or "
+                "initialize CondAttribution with overwrite_data_grad=True.",
+                stacklevel=2,
+            )
+
+        expected_layers = None
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                raise TypeError("Each condition must be a dictionary.")
+            if self.MODEL_OUTPUT_NAME not in condition and start_layer is None and init_rel is None:
+                raise ValueError(
+                    f"Either {self.MODEL_OUTPUT_NAME!r}, start_layer, or init_rel must be defined."
+                )
+            if self.MODEL_OUTPUT_NAME in condition and start_layer is not None:
+                warnings.warn(
+                    f"The {self.MODEL_OUTPUT_NAME!r} condition has no effect when "
+                    f"start_layer={start_layer!r} is supplied.",
+                    stacklevel=2,
+                )
+            if exclude_parallel:
+                layer_names = frozenset(condition)
+                if expected_layers is None:
+                    expected_layers = layer_names
+                elif layer_names != expected_layers:
+                    raise ValueError(
+                        "When exclude_parallel=True, every condition passed to one "
+                        "attribution call must contain the same layer names."
+                    )
+
+    def _register_mask_fn(self, hook, mask_map, b_index, c_indices, l_name, *mask_args):
+        """Create and register a concept mask for one condition."""
+        if isinstance(mask_map, dict):
+            try:
+                mask_factory = mask_map[l_name]
+            except KeyError as error:
+                raise KeyError(f"No mask function configured for layer {l_name!r}.") from error
+        elif callable(mask_map):
+            mask_factory = mask_map
+        else:
+            raise TypeError("mask_map must be a callable or a dictionary of callables.")
+
+        hook.fn_list.append(mask_factory(b_index, c_indices, l_name, *mask_args))
 
 
     def __call__(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = None, start_layer: str = None, init_rel=None,
             on_device: str = None, exclude_parallel=True) -> attrResult:
 
@@ -210,7 +271,46 @@ class CondAttribution:
         raise NotImplementedError
 
     def _conditions_wrapper(self, *args):
-        raise NotImplementedError
+        """Run condition groups independently and concatenate their results."""
+        data, conditions = args[:2]
+        grouped_conditions = self._separate_conditions(conditions)
+
+        results = [
+            self._attribute(data, group, *args[2:])
+            for group in grouped_conditions.values()
+        ]
+        if not results:
+            raise ValueError("conditions must contain at least one condition dictionary.")
+
+        return attrResult(
+            self._concatenate_batches([result.heatmap for result in results]),
+            self._concatenate_layer_values([result.activations for result in results]),
+            self._concatenate_layer_values([result.relevances for result in results]),
+            self._concatenate_batches([result.prediction for result in results]),
+        )
+
+    @classmethod
+    def _concatenate_batches(cls, values):
+        """Concatenate tensor batches, including multimodal tuple outputs."""
+        first = values[0]
+        if isinstance(first, tuple):
+            if not all(isinstance(value, tuple) and len(value) == len(first) for value in values):
+                raise TypeError("Cannot concatenate attribution outputs with different structures.")
+            return tuple(
+                cls._concatenate_batches([value[index] for value in values])
+                for index in range(len(first))
+            )
+        return torch.cat(values, dim=0)
+
+    @classmethod
+    def _concatenate_layer_values(cls, mappings):
+        layer_names = set().union(*(mapping.keys() for mapping in mappings))
+        return {
+            layer_name: cls._concatenate_batches(
+                [mapping[layer_name] for mapping in mappings if layer_name in mapping]
+            )
+            for layer_name in layer_names
+        }
 
     def _separate_conditions(self, conditions):
         """
@@ -231,7 +331,7 @@ class CondAttribution:
 
     def _attribute(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = None, start_layer: str = None, init_rel=None,
             on_device: str = None, exclude_parallel=True) -> attrResult:
         """
@@ -243,7 +343,7 @@ class CondAttribution:
 
     def generate(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = None, start_layer: str = None, init_rel=None,
             batch_size=10, on_device=None, exclude_parallel=True, verbose=True, *args) -> attrResult:
         """
@@ -264,10 +364,26 @@ class CondAttribution:
     @staticmethod
     def _generate_hook(layer_name, layer_out):
         def get_tensor_hook(module, input, output):
-            layer_out[layer_name] = output
-            output.retain_grad()
+            tensor = output[0] if isinstance(output, tuple) else output
+            if not torch.is_tensor(tensor):
+                raise TypeError(
+                    f"Layer {layer_name!r} must return a tensor or a tuple whose first item is a tensor."
+                )
+            layer_out[layer_name] = tensor
+            if tensor.requires_grad:
+                tensor.retain_grad()
 
         return get_tensor_hook
+
+    @staticmethod
+    @contextmanager
+    def _cleanup_handles(handles):
+        """Always remove temporary forward hooks, including after failed attribution."""
+        try:
+            yield
+        finally:
+            for handle in handles:
+                handle.remove()
 
     def _append_recording_layer_hooks(self, record_l_names: list, start_layer, cond_l_names):
         """
@@ -364,7 +480,7 @@ class AttributionGraph:
         self.mask_map = {l_name: c.mask for l_name, c in layer_map.items()}
 
     def __call__(
-            self, sample, composite, concept_id: int, layer_name, target=None, width: List[int] = [4, 2],
+            self, sample, composite, concept_id: int, layer_name, target=None, width: List[int] = None,
             parent_c_id: int = None, parent_layer: str = None, abs_norm=True, batch_size=16, verbose=True):
         """
         Decomposes a higher-level concept into its lower-level concepts taking advantage of the
@@ -406,6 +522,7 @@ class AttributionGraph:
             the second the index and the third the relevance value.
 
         """
+        width = [4, 2] if width is None else width
         nodes = [(layer_name, concept_id)]
         connections = {}
 

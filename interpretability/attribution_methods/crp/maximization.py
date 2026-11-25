@@ -40,11 +40,17 @@ class Maximization:
         # TODO: activation in save path instead of relevance!
         # TODO: for statistics in other class: make dummy variable for extra datset instead of SDS
 
-    def analyze_layer(self, rel, concept: Concept, layer_name: str, data_indices, targets):
+    def analyze_layer(self, rel, concept: Concept, layer_name: str, data_indices, targets,
+                      additional_forward_kwargs=None):
         #print(f"---Maximim, analyze layer {layer_name}---")
 
-        b_c_sorted, rel_c_sorted, rf_c_sorted = concept.reference_sampling(
-            rel, layer_name, self.max_target, self.abs_norm)
+        sampling_args = (rel, layer_name, self.max_target, self.abs_norm)
+        if additional_forward_kwargs is None:
+            b_c_sorted, rel_c_sorted, rf_c_sorted = concept.reference_sampling(*sampling_args)
+        else:
+            b_c_sorted, rel_c_sorted, rf_c_sorted = concept.reference_sampling(
+                *sampling_args, additional_forward_kwargs
+            )
 
         #print("Max analyze layer, b_c_sorted shape", b_c_sorted.shape)
         #print("rel_c_sorted shape", rel_c_sorted.shape)

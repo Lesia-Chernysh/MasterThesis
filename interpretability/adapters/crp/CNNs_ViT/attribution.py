@@ -1,19 +1,11 @@
 from zennit.composites import NameMapComposite
 from zennit.core import Composite
 from interpretability.attribution_methods.crp.hooks import MaskHook
-from interpretability.attribution_methods.crp.concepts import Concept, ChannelConcept, TransformerChannelConcept
-from interpretability.attribution_methods.crp.graph import ModelGraph
 from typing import Callable, List, Dict, Union, Tuple
 import torch
-import warnings
-import numpy as np
 import math
 from tqdm import tqdm
-from collections import namedtuple
-from interpretability.attribution_methods.crp.attribution import CondAttribution
-
-attrResult = namedtuple("AttributionResults", "heatmap, activations, relevances, prediction")
-attrGraphResult = namedtuple("AttributionGraphResults", "nodes, connections")
+from interpretability.attribution_methods.crp.attribution import CondAttribution, attrResult
 
 
 class CondAttributionCNNAdapter(CondAttribution):
@@ -44,49 +36,11 @@ class CondAttributionCNNAdapter(CondAttribution):
         return data, conditions
 
     def _check_arguments(self, data, conditions, start_layer, exclude_parallel, init_rel):
-
-        if not data.requires_grad:
-            raise ValueError(
-                "requires_grad attribute of 'data' must be True.")
-
-        if self.overwrite_data_grad:
-            data.grad = None
-        elif data.grad is not None:
-            warnings.warn("'data' already has a filled .grad attribute. Set to None if not intended or set 'overwrite_grad' to True.")
-
-        distinct_cond = set()
-        for cond in conditions:
-            if self.MODEL_OUTPUT_NAME not in cond and start_layer is None and init_rel is None:
-                raise ValueError(
-                    f"Either {self.MODEL_OUTPUT_NAME} in 'conditions' or 'start_layer' or 'init_rel' must be defined.")
-
-            if self.MODEL_OUTPUT_NAME in cond and start_layer is not None:
-                warnings.warn(
-                    f"You defined a condition for {self.MODEL_OUTPUT_NAME} that has no effect, since the 'start_layer' {start_layer}"
-                    " is provided where the backward pass begins. If this behavior is not wished, remove 'start_layer'.")
-
-            if exclude_parallel:
-
-                if len(distinct_cond) == 0:
-                    distinct_cond.update(cond.keys())
-                elif distinct_cond ^ set(cond.keys()):
-                    raise ValueError("If the 'exclude_parallel' flag is set to True, each condition dict must contain the"
-                                     " same layer names. (This limitation does not apply to the __call__ method)")
+        return super()._check_arguments(data, conditions, start_layer, exclude_parallel, init_rel)
 
 
     def _register_mask_fn(self, hook, mask_map, b_index, c_indices, l_name):
-        #print("_register_mask_fn")
-
-        if callable(mask_map):
-            mask_fn = mask_map(b_index, c_indices, l_name)
-            #print("b_index, c_indices, l_name", b_index, c_indices, l_name)
-        elif isinstance(mask_map, Dict):
-            mask_fn = mask_map[l_name](b_index, c_indices, l_name)
-            #print("b_index, c_indices, l_name", b_index, c_indices, l_name)
-        else:
-            raise ValueError("<mask_map> must be a dictionary or callable function.")
-
-        hook.fn_list.append(mask_fn)
+        return super()._register_mask_fn(hook, mask_map, b_index, c_indices, l_name)
 
 
     def __call__(
@@ -159,39 +113,7 @@ class CondAttributionCNNAdapter(CondAttribution):
             return self._attribute(data, conditions, composite, record_layer, mask_map, start_layer, init_rel, on_device, False)
 
     def _conditions_wrapper(self, *args):
-        """
-        Since 'exclude_parallel'=True requires that the condition set contains only the same layer names,
-        the list is divided into distinct lists that all contain the same layer name.
-        """
-        #print("attrib, _conditions_wrapper")
-
-        data, conditions = args[:2]
-
-        relevances, activations = {}, {}
-        heatmap, prediction = None, None
-
-        dist_conds = self._separate_conditions(conditions)
-
-        for dist_layer in dist_conds:
-
-            attr = self._attribute(data, dist_conds[dist_layer], *args[2:])
-
-            for l_name in attr.relevances:
-                if l_name not in relevances:
-                    relevances[l_name] = attr.relevances[l_name]
-                    activations[l_name] = attr.activations[l_name]
-                else:
-                    relevances[l_name] = torch.cat([relevances[l_name], attr.relevances[l_name]], dim=0)
-                    activations[l_name] = torch.cat([activations[l_name], attr.activations[l_name]], dim=0)
-
-            if heatmap is None:
-                heatmap = attr.heatmap
-                prediction = attr.prediction
-            else:
-                heatmap = torch.cat([heatmap, attr.heatmap], dim=0)
-                prediction = torch.cat([prediction, attr.prediction], dim=0)
-
-        return attrResult(heatmap, activations, relevances, prediction)
+        return super()._conditions_wrapper(*args)
 
     def _attribute(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
@@ -245,7 +167,7 @@ class CondAttributionCNNAdapter(CondAttribution):
         data.grad = None
 
         # apply conditional masking to earlier received outputs for each layer
-        with mask_composite.context(self.model), composite.context(self.model) as modified:
+        with self._cleanup_handles(handles), mask_composite.context(self.model), composite.context(self.model) as modified:
             #print("Inside with mask_composite.context")
             if start_layer:
                 _ = modified(data)
@@ -317,7 +239,6 @@ class CondAttributionCNNAdapter(CondAttribution):
             activations, relevances = {}, {}
             if len(layer_out) > 0:
                 activations, relevances = self._collect_hook_activation_relevance(layer_out, on_device)
-            [h.remove() for h in handles]
 
             #print(
             #    "DATA GRAD BEFORE HEATMAP:",
@@ -405,7 +326,7 @@ class CondAttributionCNNAdapter(CondAttribution):
         data_batch.retain_grad()
         retain_graph = True
 
-        with mask_composite.context(self.model), composite.context(self.model) as modified:
+        with self._cleanup_handles(handles), mask_composite.context(self.model), composite.context(self.model) as modified:
 
             if start_layer:
                 _ = modified(data_batch)
@@ -455,8 +376,6 @@ class CondAttributionCNNAdapter(CondAttribution):
 
                 self._reset_gradients(data_batch)
                 [hook.fn_list.clear() for hook in hook_map.values()]
-
-        [h.remove() for h in handles]
 
         if verbose:
             pbar.close()

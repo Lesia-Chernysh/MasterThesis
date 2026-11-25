@@ -297,7 +297,7 @@ class FeatureVisualization:
         raise NotImplementedError
 
     def _attribution_on_reference(self, data, concept_id: int, layer_name: str, composite, rf=False,
-                                  neuron_ids: list = [], batch_size=32):
+                                  neuron_ids: list = None, batch_size=32):
         raise NotImplementedError
 
     def compute_stats(self, concept_id, layer_name: str, mode="relevance", top_N=5, mean_N=10, norm=False) -> Tuple[
@@ -357,7 +357,7 @@ class FeatureVisualization:
             self.Cache.save(ref, layer_name, mode, r_range, composite, rf, f_name, plot_fn.__name__)
 
     def precompute_ref(self, layer_c_ind: Dict[str, List], composite: Composite, rf=True, stats=False, top_N=4,
-                       mean_N=10, mode="relevance", r_range: Tuple[int, int] = (0, 8), plot_list=[vis_opaque_img],
+                       mean_N=10, mode="relevance", r_range: Tuple[int, int] = (0, 8), plot_list=None,
                        batch_size=32):
         """
         Precomputes and saves all reference samples resulting from 'self.get_ref_samples' and 'self.get_stats_reference' for concepts supplied in 'layer_c_ind'.
@@ -373,6 +373,8 @@ class FeatureVisualization:
 
         REMAINING PARAMETERS: correspond to 'self.get_ref_samples' and 'self.get_stats_reference'
         """
+
+        plot_list = [vis_opaque_img] if plot_list is None else plot_list
 
         if self.Cache is None:
             raise ValueError(

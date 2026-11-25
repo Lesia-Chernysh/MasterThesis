@@ -18,21 +18,27 @@ from interpretability.attribution_methods.crp.hooks import FeatVisHook
 from interpretability.attribution_methods.crp.helper import load_maximization, load_statistics, load_stat_targets
 from interpretability.attribution_methods.crp.image import vis_img_heatmap, vis_opaque_img
 from interpretability.attribution_methods.crp.cache import Cache
+from interpretability.adapters.crp.ViLT.hooks import FeatVisHookViLT
 
 from interpretability.attribution_methods.crp.visualization import FeatureVisualization
 
 
 class ViLTFeatureVisualization(FeatureVisualization):
 
-    def run_distributed(self, data_start, data_end, composite: Composite = None, batch_size=32, checkpoint=500,
+    def run_distributed(self, composite: Composite, data_start, data_end, batch_size=32, checkpoint=500,
                         on_device=None):
         """
         max batch_size = max(multi_targets) * data_batch
         data_end: exclusively counted
         """
 
+        if data_end <= data_start:
+            raise ValueError("data_end must be greater than data_start.")
+        if batch_size <= 0 or checkpoint <= 0:
+            raise ValueError("batch_size and checkpoint must be positive integers.")
+
         self.saved_checkpoints = {"r_max": [], "a_max": [], "r_stats": [], "a_stats": []}
-        last_checkpoint = 0
+        last_checkpoint = data_start
 
         n_samples = data_end - data_start
         samples = np.arange(start=data_start, stop=data_end)
@@ -46,56 +52,67 @@ class ViLTFeatureVisualization(FeatureVisualization):
         # feature visualization is performed inside forward and backward hook of layers
         name_map, dict_inputs = [], {}
         for l_name, concept in self.layer_map.items():
-            hook = FeatVisHook(self, concept, l_name, dict_inputs, on_device)
+            hook = FeatVisHookViLT(self, concept, l_name, dict_inputs, on_device)
             name_map.append(([l_name], hook))
         fv_composite = NameMapComposite(name_map)
 
-        if composite:
-            composite.register(self.attribution.model)
-        fv_composite.register(self.attribution.model)
-
         pbar = tqdm(total=batches, dynamic_ncols=True)
+        composite_registered = False
+        fv_registered = False
+        last_processed = data_start
+        try:
+            if composite:
+                composite.register(self.attribution.model)
+                composite_registered = True
+            fv_composite.register(self.attribution.model)
+            fv_registered = True
 
-        for b in range(batches):
+            for b in range(batches):
+                pbar.update(1)
+                source_indices = samples[b * batch_size: (b + 1) * batch_size]
+                last_processed = int(source_indices[-1]) + 1
+                inputs, multi_targets = self.get_data_concurrently(source_indices)
 
-            pbar.update(1)
+                target_counts = list(map(len, multi_targets))
+                targets = np.asarray(list(itertools.chain.from_iterable(multi_targets)))
+                if targets.size == 0:
+                    continue
 
-            sample_indices = samples[b * batch_size: (b + 1) * batch_size]
-            inputs, multi_targets = self.get_data_concurrently(sample_indices)
+                for key, input_batch in inputs.items():
+                    repeats = torch.as_tensor(target_counts, device=input_batch.device)
+                    inputs[key] = input_batch.repeat_interleave(repeats, dim=0)
+                sample_indices = np.asarray(source_indices).repeat(target_counts, axis=0)
 
-            # handle multiple targets (vqa has multiple answers per question)
-            target_counts = list(map(len, multi_targets))
-            targets = np.array(list(itertools.chain(*multi_targets)))  # flatten 2d list
-            # copy data for every target in target list
-            for key, input_batch in inputs.items():
-                repeats = torch.as_tensor(target_counts, device=input_batch.device)
-                inputs[key] = input_batch.repeat_interleave(repeats, dim=0)
-            sample_indices = np.array(sample_indices).repeat(target_counts, axis=0)
+                conditions = [{self.attribution.MODEL_OUTPUT_NAME: [target]} for target in targets]
+                dict_inputs["sample_indices"] = sample_indices
+                dict_inputs["targets"] = targets
+                additional_forward_kwargs = {
+                    "token_type_ids": inputs.token_type_ids,
+                    "attention_mask": inputs.attention_mask,
+                    "pixel_mask": inputs.pixel_mask,
+                }
+                dict_inputs["additional_forward_kwargs"] = additional_forward_kwargs
 
-            conditions = [{self.attribution.MODEL_OUTPUT_NAME: [t]} for t in targets]
-            # dict_inputs is linked to FeatHooks
-            dict_inputs["sample_indices"] = sample_indices
-            dict_inputs["targets"] = targets
-            additional_forward_kwargs = {"token_type_ids": inputs.token_type_ids,
-                                         "attention_mask": inputs.attention_mask, "pixel_mask": inputs.pixel_mask}
-            dict_inputs["additional_forward_kwargs"] = additional_forward_kwargs
+                self.attribution(
+                    (inputs.pixel_values, inputs.input_embeds),
+                    conditions,
+                    None,
+                    exclude_parallel=False,
+                    additional_forward_kwargs=additional_forward_kwargs,
+                )
 
-            # composites are already registered before
-            self.attribution((inputs.pixel_values, inputs.input_embeds), conditions, None, exclude_parallel=False,
-                             additional_forward_kwargs=additional_forward_kwargs)
+                if b % checkpoint == checkpoint - 1:
+                    self._save_results((last_checkpoint, last_processed))
+                    last_checkpoint = last_processed
 
-            if b % checkpoint == checkpoint - 1:
-                self._save_results((last_checkpoint, b + 1))
-                last_checkpoint = b + 1
-
-        # TODO: what happens if result arrays are empty?
-        self._save_results((last_checkpoint, b + 1))
-
-        if composite:
-            composite.remove()
-        fv_composite.remove()
-
-        pbar.close()
+            if last_processed > last_checkpoint:
+                self._save_results((last_checkpoint, last_processed))
+        finally:
+            if fv_registered:
+                fv_composite.remove()
+            if composite_registered:
+                composite.remove()
+            pbar.close()
 
         return self.saved_checkpoints
 
@@ -209,10 +226,19 @@ class ViLTFeatureVisualization(FeatureVisualization):
                 for key, input_batch in inputs.items()
             }
 
-            conditions = [{layer_name: [concept_id]}]
+            if rf:
+                batch_neuron_ids = neuron_ids[batch_slice]
+                conditions = [
+                    {layer_name: {concept_id: int(neuron_id)}}
+                    for neuron_id in batch_neuron_ids
+                ]
+                mask_map = self.layer_map[layer_name].mask_rf
+            else:
+                conditions = [{layer_name: [concept_id]}]
+                mask_map = self.layer_map[layer_name].mask
             # initialize relevance with activation before non-linearity (could be changed in a future release)
             attr = self.attribution((batch_inputs["pixel_values"], batch_inputs["input_embeds"]), conditions, composite,
-                                    mask_map=self.layer_map[layer_name].mask, start_layer=layer_name,
+                                    mask_map=mask_map, start_layer=layer_name,
                                     on_device=self.device, exclude_parallel=False,
                                     additional_forward_kwargs={"token_type_ids": batch_inputs["token_type_ids"],
                                                                "attention_mask": batch_inputs["attention_mask"],
