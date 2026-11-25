@@ -68,7 +68,8 @@ class ViLTFeatureVisualization(FeatureVisualization):
             targets = np.array(list(itertools.chain(*multi_targets)))  # flatten 2d list
             # copy data for every target in target list
             for key, input_batch in inputs.items():
-                inputs[key] = input_batch.repeat_interleave(torch.tensor(target_counts).cuda(), dim=0)
+                repeats = torch.as_tensor(target_counts, device=input_batch.device)
+                inputs[key] = input_batch.repeat_interleave(repeats, dim=0)
             sample_indices = np.array(sample_indices).repeat(target_counts, axis=0)
 
             conditions = [{self.attribution.MODEL_OUTPUT_NAME: [t]} for t in targets]
@@ -186,8 +187,9 @@ class ViLTFeatureVisualization(FeatureVisualization):
             return inputs
 
     def _attribution_on_reference(self, inputs, concept_id: int, layer_name: str, composite, rf=False,
-                                  neuron_ids: list = [], batch_size=32):
+                                  neuron_ids: list = None, batch_size=32):
 
+        neuron_ids = [] if neuron_ids is None else neuron_ids
         n_samples = len(inputs.input_ids)
         if n_samples > batch_size:
             batches = math.ceil(n_samples / batch_size)
@@ -201,17 +203,20 @@ class ViLTFeatureVisualization(FeatureVisualization):
         img_heatmaps = []
         txt_heatmaps = []
         for b in range(batches):
-            for key, input_batch in inputs.items():
-                inputs[key] = input_batch[b * batch_size: (b + 1) * batch_size]
+            batch_slice = slice(b * batch_size, (b + 1) * batch_size)
+            batch_inputs = {
+                key: input_batch[batch_slice]
+                for key, input_batch in inputs.items()
+            }
 
             conditions = [{layer_name: [concept_id]}]
             # initialize relevance with activation before non-linearity (could be changed in a future release)
-            attr = self.attribution((inputs.pixel_values, inputs.input_embeds), conditions, composite,
+            attr = self.attribution((batch_inputs["pixel_values"], batch_inputs["input_embeds"]), conditions, composite,
                                     mask_map=self.layer_map[layer_name].mask, start_layer=layer_name,
                                     on_device=self.device, exclude_parallel=False,
-                                    additional_forward_kwargs={"token_type_ids": inputs.token_type_ids,
-                                                               "attention_mask": inputs.attention_mask,
-                                                               "pixel_mask": inputs.pixel_mask}, rf=rf)
+                                    additional_forward_kwargs={"token_type_ids": batch_inputs["token_type_ids"],
+                                                               "attention_mask": batch_inputs["attention_mask"],
+                                                               "pixel_mask": batch_inputs["pixel_mask"]}, rf=rf)
 
             img_heatmaps.extend(attr.heatmap[0].sum(1))
             txt_heatmaps.extend(attr.heatmap[1].sum(-1))

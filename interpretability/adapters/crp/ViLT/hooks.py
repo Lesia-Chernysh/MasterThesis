@@ -1,11 +1,8 @@
 import weakref
 import functools
-import torch
-
 from zennit.core import RemovableHandle, RemovableHandleList
-from attribution_methods.crp.hooks import FeatVisHook
 
-class FeatVisHookViLT():
+class FeatVisHookViLT:
     '''Feature Visualization hooks for reference sampling inside forward and backward passes.'''
 
     def __init__(self, FV, concept, layer_name, dict_inputs, on_device):

@@ -91,7 +91,7 @@ class CondAttributionCNNAdapter(CondAttribution):
 
     def __call__(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = None, start_layer: str = None, init_rel=None,
             on_device: str = None, exclude_parallel=True) -> attrResult:
 
@@ -152,6 +152,7 @@ class CondAttributionCNNAdapter(CondAttribution):
         if mask_map is None:
             mask_map = self.concept.mask
 
+        record_layer = [] if record_layer is None else record_layer
         if exclude_parallel:
             return self._conditions_wrapper(data, conditions, composite, record_layer, mask_map, start_layer, init_rel, on_device, True)
         else:
@@ -194,7 +195,7 @@ class CondAttributionCNNAdapter(CondAttribution):
 
     def _attribute(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = None, start_layer: str = None, init_rel=None,
             on_device: str = None, exclude_parallel=True) -> attrResult:
         """
@@ -202,6 +203,7 @@ class CondAttributionCNNAdapter(CondAttribution):
         exclude_parallel: boolean
             If set, all layer names in 'conditions' must be identical. This limitation does not apply to the __call__ method.
         """
+        record_layer = [] if record_layer is None else record_layer
         #print("attribution, _attribute")
         if mask_map is None:
             mask_map = self.concept.mask
@@ -240,7 +242,6 @@ class CondAttributionCNNAdapter(CondAttribution):
         if composite is None:
             composite = Composite()
 
-        torch.autograd.set_detect_anomaly(True)
         data.grad = None
 
         # apply conditional masking to earlier received outputs for each layer
@@ -353,7 +354,7 @@ class CondAttributionCNNAdapter(CondAttribution):
 
     def generate(
             self, data: torch.tensor, conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = None, start_layer: str = None, init_rel=None,
             batch_size=10, on_device=None, exclude_parallel=True, verbose=True, *args) -> attrResult:
         """
@@ -369,6 +370,7 @@ class CondAttributionCNNAdapter(CondAttribution):
         verbose: boolean
             If set, a progressbar is displayed.
         """
+        record_layer = [] if record_layer is None else record_layer
         if mask_map is None:
             mask_map = self.concept.mask
 
@@ -471,5 +473,5 @@ class CondAttributionCNNAdapter(CondAttribution):
         data.grad = None
 
     def check(self):
-        print("Using CNN-ViT adapter")
+        return None
 

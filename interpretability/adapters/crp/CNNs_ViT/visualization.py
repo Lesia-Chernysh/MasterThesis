@@ -216,7 +216,8 @@ class FeatureVisualizationCNNsAdapter(FeatureVisualization):
 
 
     def _attribution_on_reference(self, data, concept_id: int, layer_name: str, composite, rf=False,
-                                  neuron_ids: list = [], batch_size=32):
+                                  neuron_ids: list = None, batch_size=32):
+        neuron_ids = [] if neuron_ids is None else neuron_ids
         # print("_attribution_on_reference")
         # print("concept_id", concept_id)
 

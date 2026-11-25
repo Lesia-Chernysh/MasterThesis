@@ -51,7 +51,7 @@ class CondAttributionViLTAdapter(CondAttribution):
             raise ValueError(
                 "requires_grad attribute of 'inputs' must be True.")
 
-        if self.overwrite_input_grad:
+        if self.overwrite_data_grad:
             for i in inputs:
                 i.grad = None
         elif any(i.grad is not None for i in inputs):
@@ -91,10 +91,10 @@ class CondAttributionViLTAdapter(CondAttribution):
 
     def __call__(
             self, inputs: Union[torch.Tensor, Tuple[torch.Tensor]], conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = TransformerChannelConcept.mask, start_layer: str = None,
             init_rel=None,
-            on_device: str = None, exclude_parallel=True, additional_forward_kwargs: Dict[str, torch.Tensor] = {},
+            on_device: str = None, exclude_parallel=True, additional_forward_kwargs: Dict[str, torch.Tensor] = None,
             rf=False) -> attrResult:
 
         """
@@ -150,6 +150,8 @@ class CondAttributionViLTAdapter(CondAttribution):
             'prediction': torch.Tensor
                 The model prediction output. If 'start_layer' is set, 'prediction' is the layer activation.
         """
+        record_layer = [] if record_layer is None else record_layer
+        additional_forward_kwargs = {} if additional_forward_kwargs is None else additional_forward_kwargs
         if exclude_parallel:
             return self._conditions_wrapper(inputs, conditions, composite, record_layer, mask_map, start_layer,
                                             init_rel, on_device, True, additional_forward_kwargs, rf)
@@ -193,16 +195,18 @@ class CondAttributionViLTAdapter(CondAttribution):
 
     def _attribute(
             self, inputs: Union[torch.Tensor, Tuple[torch.Tensor]], conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = TransformerChannelConcept.mask, start_layer: str = None,
             init_rel=None,
-            on_device: str = None, exclude_parallel=True, additional_forward_kwargs: Dict[str, torch.Tensor] = {},
+            on_device: str = None, exclude_parallel=True, additional_forward_kwargs: Dict[str, torch.Tensor] = None,
             rf=False) -> attrResult:
         """
         Computes the actual attributions as described in __call__ method docstring.
         exclude_parallel: boolean
             If set, all layer names in 'conditions' must be identical. This limitation does not apply to the __call__ method.
         """
+        record_layer = [] if record_layer is None else record_layer
+        additional_forward_kwargs = {} if additional_forward_kwargs is None else additional_forward_kwargs
         # print(f"record layer: {record_layer}")
 
         if not isinstance(inputs, tuple):
@@ -263,11 +267,11 @@ class CondAttributionViLTAdapter(CondAttribution):
 
     def generate(
             self, inputs: Union[torch.Tensor, Tuple[torch.Tensor]], conditions: List[Dict[str, List]],
-            composite: Composite = None, record_layer: List[str] = [],
+            composite: Composite = None, record_layer: List[str] = None,
             mask_map: Union[Callable, Dict[str, Callable]] = TransformerChannelConcept.mask, start_layer: str = None,
             init_rel=None,
             batch_size=10, on_device=None, exclude_parallel=True, verbose=True,
-            additional_forward_kwargs: Dict[str, torch.Tensor] = {}, rf=False) -> attrResult:
+            additional_forward_kwargs: Dict[str, torch.Tensor] = None, rf=False) -> attrResult:
         """
         Computes several conditional attributions for single data point by broadcasting 'inputs' to length 'batch_size' and
         iterating through the 'conditions' list with stepsize 'batch_size'. The model forward pass is performed only once and
@@ -282,6 +286,8 @@ class CondAttributionViLTAdapter(CondAttribution):
             If set, a progressbar is displayed.
         """
 
+        record_layer = [] if record_layer is None else record_layer
+        additional_forward_kwargs = {} if additional_forward_kwargs is None else additional_forward_kwargs
         if not isinstance(inputs, tuple):
             inputs = (inputs,)
         self._check_arguments(inputs, conditions, start_layer, exclude_parallel, init_rel)
@@ -311,7 +317,7 @@ class CondAttributionViLTAdapter(CondAttribution):
             batch_size = cond_length
 
         inputs_batched = tuple(torch.repeat_interleave(i, batch_size, dim=0) for i in inputs)
-        additional_forward_kwargs = {key: torch.repeat_interleave(val, len(conditions), dim=0) for key, val in
+        additional_forward_kwargs = {key: torch.repeat_interleave(val, batch_size, dim=0) for key, val in
                                      additional_forward_kwargs}
         for b in inputs_batched:
             b.grad = None
