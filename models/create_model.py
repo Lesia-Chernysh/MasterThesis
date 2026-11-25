@@ -1,7 +1,7 @@
 import timm
 import torch
 import torch.nn as nn
-from utils.lxt.explicit.models.vilt import ViltForQuestionAnswering, attnlrp as lrp_rule_composite
+from interpretability.utils.lxt.explicit.models.vilt import ViltForQuestionAnswering, attnlrp as lrp_rule_composite
 from torchvision.models import resnet50, ResNet50_Weights
 from transformers import AutoModelForImageClassification, Qwen2VLForConditionalGeneration
 
