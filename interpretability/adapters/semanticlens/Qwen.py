@@ -41,7 +41,7 @@ class QwenAdapter(SemanticLensAdapter):
             questions=None,
     ) -> PreparedBatch:
 
-        def _prepare_images(self, images):
+        def _prepare_images(images):
             prepared_images = []
 
             for image in images:
@@ -67,7 +67,7 @@ class QwenAdapter(SemanticLensAdapter):
 
         conversations = []
 
-        images = self._prepare_images(images)
+        images = _prepare_images(images)
         for image, question in zip(images, questions):
             conversation = {
                 "role": "user",
