@@ -40,51 +40,59 @@ class QwenAdapter(SemanticLensAdapter):
             device,
             questions=None,
     ) -> PreparedBatch:
+        images = list(images)
 
-        def _prepare_images(images):
-            prepared_images = []
-
-            for image in images:
-                image = resize(
-                    image,
-                    [224, 224],
-                    interpolation=InterpolationMode.BICUBIC,
-                    antialias=True,
-                )
-                prepared_images.append(image)
+        # Resize the actual objects that will be put into the
+        # conversations.
+        prepared_images = [
+            resize(
+                image,
+                size=[224, 224],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            )
+            for image in images
+        ]
 
         if questions is None:
             questions = [
                 self.prompt
-                for _ in images
+                for _ in prepared_images
             ]
+        else:
+            questions = list(questions)
 
-        if len(questions) != len(images):
+        if len(questions) != len(prepared_images):
             raise ValueError(
-                f"Received {len(images)} images but "
+                f"Received {len(prepared_images)} images but "
                 f"{len(questions)} questions"
             )
 
         conversations = []
 
-        _prepare_images(images)
-
-        for image, question in zip(images, questions):
-            conversation = {
-                "role": "user",
-                "content": [
+        for image, question in zip(
+                prepared_images,
+                questions,
+        ):
+            conversations.append(
+                [
                     {
-                        "type": "image",
-                        "image": image,
-                    },
-                    {
-                        "type": "text",
-                        "text": question,
-                    },
-                ],
-            }
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
 
-            conversations.append([conversation])
+                                # Important: use the resized image.
+                                "image": image,
+                            },
+                            {
+                                "type": "text",
+                                "text": question,
+                            },
+                        ],
+                    }
+                ]
+            )
 
         inputs = self.processor.apply_chat_template(
             conversations,
@@ -95,42 +103,37 @@ class QwenAdapter(SemanticLensAdapter):
             return_tensors="pt",
         )
 
-        # Validate grids
+        inputs = inputs.to(device)
+
         grid_thw = inputs["image_grid_thw"]
 
         expected = torch.tensor(
             [1, 16, 16],
+            dtype=grid_thw.dtype,
             device=grid_thw.device,
         )
 
-        if not torch.all(grid_thw == expected):
+        valid_grids = torch.all(
+            grid_thw == expected.unsqueeze(0),
+            dim=1,
+        )
+
+        if not torch.all(valid_grids):
             raise ValueError(
-                "Unexpected Qwen visual grid: "
+                "Unexpected Qwen visual grids: "
                 f"{grid_thw.detach().cpu().tolist()}; "
                 "expected [1, 16, 16] for every image"
             )
 
-        # BatchEncoding supports .to(device).
-        inputs = inputs.to(device)
-
-        grid_thw = inputs[
-            "image_grid_thw"
-        ].detach().cpu()
-
-        spatial_info = [
-            SpatialInfo(
-                grid_h=int(grid[1]),
-                grid_w=int(grid[2]),
-                metadata={
-                    "temporal_grid": int(grid[0]),
-                },
-            )
-            for grid in grid_thw
-        ]
-
         return PreparedBatch(
             kwargs=dict(inputs),
-            spatial_info=spatial_info,
+            spatial_info=[
+                SpatialInfo(
+                    grid_h=16,
+                    grid_w=16,
+                )
+                for _ in prepared_images
+            ],
         )
 
     def prepare_loader_batch(
