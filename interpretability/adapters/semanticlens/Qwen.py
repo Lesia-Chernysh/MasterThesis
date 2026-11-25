@@ -272,3 +272,34 @@ class QwenAdapter(SemanticLensAdapter):
             .float()
             .numpy()
         )
+
+
+    # Don't include the question, since visual encoder encodes the image before it sees the qustion
+    def forward(
+            self,
+            model,
+            prepared_batch,
+    ):
+        pixel_values = prepared_batch.kwargs[
+            "pixel_values"
+        ]
+
+        image_grid_thw = prepared_batch.kwargs[
+            "image_grid_thw"
+        ]
+
+        # Transformers versions expose the vision encoder in one
+        # of these two locations.
+        vision_model = getattr(
+            model,
+            "visual",
+            None,
+        )
+
+        if vision_model is None:
+            vision_model = model.model.visual
+
+        return vision_model(
+            pixel_values,
+            grid_thw=image_grid_thw,
+        )
