@@ -1,7 +1,7 @@
 import torch.nn as nn
-from utils.lxt.explicit.rules import WrapModule
-from utils.lxt.explicit.modules import INIT_MODULE_MAPPING
-from utils.lxt.explicit.check import FN_WHITELIST, MOD_WHITELIST, FN_BLACKLIST, MOD_BLACKLIST, SYMBOLS
+from interpretability.utils.lxt.explicit.rules import WrapModule
+from interpretability.utils.lxt.explicit.modules import INIT_MODULE_MAPPING
+from interpretability.utils.lxt.explicit.check import FN_WHITELIST, MOD_WHITELIST, FN_BLACKLIST, MOD_BLACKLIST, SYMBOLS
 from transformers.utils.fx import HFTracer, get_concrete_args
 from torch.fx import GraphModule
 from warnings import warn

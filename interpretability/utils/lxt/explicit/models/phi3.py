@@ -54,11 +54,11 @@ from transformers.models.phi3.configuration_phi3 import Phi3Config
 ######################### LXT #########################
 #######################################################
 
-from lxt.explicit.modules import RMSNormIdentity
-import lxt.explicit.functional as lf
-import lxt.explicit.modules as lm
-import lxt.explicit.rules as rules
-from lxt.explicit.core import Composite
+from interpretability.utils.lxt.explicit.modules import RMSNormIdentity
+import interpretability.utils.lxt.explicit.functional as lf
+import interpretability.utils.lxt.explicit.modules as lm
+import interpretability.utils.lxt.explicit.rules as rules
+from interpretability.utils.lxt.explicit.core import Composite
 
 class ProjSiluMultiplication(nn.Module):
     def forward(self, a, b):

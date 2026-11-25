@@ -43,10 +43,10 @@ from transformers.utils import (
 from transformers.models.vit.configuration_vit import ViTConfig
 
 
-import lxt.explicit.modules as lm
-import lxt.explicit.functional as lf
-import lxt.explicit.rules as rules
-from lxt.explicit.core import Composite
+import interpretability.utils.lxt.explicit.modules as lm
+import interpretability.utils.lxt.explicit.functional as lf
+import interpretability.utils.lxt.explicit.rules as rules
+from interpretability.utils.lxt.explicit.core import Composite
 from zennit.composites import LayerMapComposite
 import zennit.rules as z_rules
 

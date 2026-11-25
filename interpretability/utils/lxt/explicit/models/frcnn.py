@@ -29,10 +29,10 @@ from torch.nn import functional as F
 from torchvision.ops import RoIPool
 from torchvision.ops.boxes import batched_nms, nms
 
-from utils import WEIGHTS_NAME, Config, cached_path, hf_bucket_url, is_remote_url, load_checkpoint
+#from interpretability.utils.lxt.utils import WEIGHTS_NAME, Config, cached_path, hf_bucket_url, is_remote_url, load_checkpoint
 
-import lxt.explicit.modules as lm
-import lxt.explicit.functional as lf
+import interpretability.utils.lxt.explicit.modules as lm
+import interpretability.utils.lxt.explicit.functional as lf
 
 # other:
 def norm_box(boxes, raw_sizes):

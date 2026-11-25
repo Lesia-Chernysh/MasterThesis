@@ -40,10 +40,10 @@ from transformers.utils import auto_docstring, logging
 from transformers.models.vilt.configuration_vilt import ViltConfig
 
 ################# LXT
-import utils.lxt.explicit.modules as lm
-import utils.lxt.explicit.functional as lf
-import utils.lxt.explicit.rules as rules
-from utils.lxt.explicit.core import Composite
+import interpretability.utils.lxt.explicit.modules as lm
+import interpretability.utils.lxt.explicit.functional as lf
+import interpretability.utils.lxt.explicit.rules as rules
+from interpretability.utils.lxt.explicit.core import Composite
 from zennit.composites import LayerMapComposite
 import zennit.rules as z_rules
 

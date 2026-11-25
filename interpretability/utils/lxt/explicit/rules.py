@@ -1,7 +1,7 @@
 import torch
 from torch.autograd import Function
 import torch.nn as nn
-from lxt.explicit.functional import _stabilize, conservation_check_wrap
+from interpretability.utils.lxt.explicit.functional import _stabilize, conservation_check_wrap
 from torch.func import jvp, vjp
 import torch.fx
 

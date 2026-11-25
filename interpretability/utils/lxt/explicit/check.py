@@ -1,7 +1,7 @@
 import operator
 import torch
 import torch.nn as nn
-from lxt.explicit.functional import CONSERVATION_CHECK_FLAG
+from interpretability.utils.lxt.explicit.functional import CONSERVATION_CHECK_FLAG
 
 class conservation_check(object):
 

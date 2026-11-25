@@ -63,11 +63,11 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 ######################### LXT #########################
 #######################################################
 
-from lxt.explicit.modules import RMSNormIdentity
-import lxt.explicit.functional as lf
-import lxt.explicit.modules as lm
-import lxt.explicit.rules as rules
-from lxt.explicit.core import Composite
+from interpretability.utils.lxt.explicit.modules import RMSNormIdentity
+import interpretability.utils.lxt.explicit.functional as lf
+import interpretability.utils.lxt.explicit.modules as lm
+import interpretability.utils.lxt.explicit.rules as rules
+from interpretability.utils.lxt.explicit.core import Composite
 
 from bitsandbytes.nn import Linear4bit, Linear8bitLt
 
