@@ -33,23 +33,41 @@ class QwenAdapter(SemanticLensAdapter):
         self.grid_w = grid_w
 
     def prepare_batch(
-        self,
-        images,
-        device,
+            self,
+            images,
+            device,
+            questions=None,
     ) -> PreparedBatch:
-        template = {
-            "role": "user",
-            "content": [
-                { "type": "image", "image": None, },
-                {"type": "text", "text": self.prompt, },
-            ],
-        }
+
+        if questions is None:
+            questions = [
+                self.prompt
+                for _ in images
+            ]
+
+        if len(questions) != len(images):
+            raise ValueError(
+                f"Received {len(images)} images but "
+                f"{len(questions)} questions"
+            )
 
         conversations = []
 
-        for image in images:
-            conversation = copy.deepcopy(template)
-            conversation["content"][0]["image"] = image
+        for image, question in zip(images, questions):
+            conversation = {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "image": image,
+                    },
+                    {
+                        "type": "text",
+                        "text": question,
+                    },
+                ],
+            }
+
             conversations.append([conversation])
 
         inputs = self.processor.apply_chat_template(
@@ -82,6 +100,41 @@ class QwenAdapter(SemanticLensAdapter):
         return PreparedBatch(
             kwargs=dict(inputs),
             spatial_info=spatial_info,
+        )
+
+    def prepare_loader_batch(
+            self,
+            batch,
+            device,
+    ):
+        questions = None
+
+        if isinstance(batch, dict):
+            images = batch["image"]
+            questions = batch.get("question")
+
+        elif isinstance(batch, (tuple, list)):
+            images = batch[0]
+
+            if len(batch) >= 2:
+                possible_questions = batch[1]
+
+                if (
+                        isinstance(possible_questions, (tuple, list))
+                        and possible_questions
+                        and all(
+                    isinstance(question, str)
+                    for question in possible_questions
+                )
+                ):
+                    questions = list(possible_questions)
+        else:
+            images = batch
+
+        return self.prepare_batch(
+            images=images,
+            device=device,
+            questions=questions,
         )
 
     def canonicalize_activations(
