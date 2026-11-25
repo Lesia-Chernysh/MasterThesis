@@ -7,7 +7,7 @@ from typing import List, Tuple
 from tqdm import tqdm
 import re
 
-from crp.concepts import Concept
+from  interpretability.attribution_methods.crp.concepts import Concept
 
 
 class Maximization:

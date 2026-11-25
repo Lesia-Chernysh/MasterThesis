@@ -1,6 +1,6 @@
 from zennit.core import Composite
-from crp.concepts import Concept, ChannelConcept, TransformerChannelConcept
-from crp.graph import ModelGraph
+from interpretability.attribution_methods.crp.concepts import Concept, ChannelConcept, TransformerChannelConcept
+from interpretability.attribution_methods.crp.graph import ModelGraph
 from typing import Callable, List, Dict, Union, Tuple
 import torch
 import warnings

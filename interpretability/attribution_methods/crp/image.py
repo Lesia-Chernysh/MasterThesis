@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 import zennit.image as zimage
-from crp.helper import max_norm
+from  interpretability.attribution_methods.crp.helper import max_norm
 
 def get_crop_range(heatmap, crop_th):
     """
