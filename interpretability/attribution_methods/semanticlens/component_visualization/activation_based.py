@@ -1265,38 +1265,53 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
         return crop_db
 
-
     def create_neuron_crops_mapping(self):
         if self.crop_db is None:
             self.crop_db = self.create_crop_db()
 
-        crop_lookup = {
-            (item['image_path'], tuple(item['bbox'])): item['crop_id']
-            for item in self.crop_db
-        }
+        def build_mapping():
+            crop_lookup = {
+                (item['image_path'], tuple(item['bbox'])): item['crop_id']
+                for item in self.crop_db
+            }
 
-        self.neurons_crops_mapping = {layer: {} for layer in self.top_k_max_samples}
-        for layer, info in self.crop_info.items():  # crop_info: neuron_id: [(img_path, bbox), ...]
-            for neuron_id, crops_info in info.items():
+            mapping = {
+                layer: {} for layer in self.top_k_max_samples
+            }
 
+            for layer, info in self.crop_info.items():
+                mapping[layer] = {
+                    neuron_id: [
+                        crop_lookup[(img_path, tuple(bbox))]
+                        for img_path, bbox in crops_info
+                    ]
+                    for neuron_id, crops_info in info.items()
+                }
 
-                for crop_info in crops_info:
-                    if neuron_id not in self.neurons_crops_mapping[layer]:
-                        try:
-                            self.neurons_crops_mapping[layer][neuron_id] = [crop_lookup[crop_info]]
-                        except KeyError: # means that cache contains either different images path or crops
-                            print("Recomputing crop_db, since it contains incompatible information.")
-                            crop_db_path = f"{OUTPUTS}/embeddings/semanticlens/{self.actmax_cache.n_collect}_refs_per_neuron/crop_db/crop_db_{self.model_name}.pt"
-                            os.remove(crop_db_path)
-                            self.crop_db = self.create_crop_db()
-                            crop_lookup = {
-                                (item['image_path'], tuple(item['bbox'])): item['crop_id']
-                                for item in self.crop_db
-                            }
-                            self.neurons_crops_mapping[layer][neuron_id] = [crop_lookup[crop_info]]
+            return mapping
 
-                    else:
-                        self.neurons_crops_mapping[layer][neuron_id].append(crop_lookup[crop_info])
+        try:
+            self.neurons_crops_mapping = build_mapping()
+
+        except KeyError:
+            print(
+                "Recomputing crop_db, since it contains "
+                "incompatible information."
+            )
+
+            crop_db_path = (
+                    Path(OUTPUTS)
+                    / "embeddings"
+                    / "semanticlens"
+                    / f"{self.actmax_cache.n_collect}_refs_per_neuron"
+                    / "crop_db"
+                    / f"crop_db_{self.model_name}.pt"
+            )
+
+            crop_db_path.unlink(missing_ok=True)
+
+            self.crop_db = self.create_crop_db()
+            self.neurons_crops_mapping = build_mapping()
 
         return self.neurons_crops_mapping
 
@@ -1318,6 +1333,8 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
         # No longer restore all crops here!
         dataset = CropDataset(self.crop_db)
+
+        print()
 
         loader = DataLoader(
             dataset,
