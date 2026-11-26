@@ -57,7 +57,7 @@ def create_qwen(device="cpu"):
 
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_id,
-        # device_map="auto",  # the accelerate library automatically decides where to place the model, i.e.  GPU or CPU
+        device_map="auto",  # the accelerate library automatically decides where to place the model, i.e.  GPU or CPU
         torch_dtype=torch.float16,
     )
 
