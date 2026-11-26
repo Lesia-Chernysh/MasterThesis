@@ -143,6 +143,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
         adapter=None,
         aggregate_fn=None,
         cache_dir: str | None = None,
+        activation_cache_device: torch.device | str | None = None,
     ):
         """
         Initialize the ActivationComponentVisualizer.
@@ -194,6 +195,7 @@ class ActivationComponentVisualizer(AbstractComponentVisualizer):
             layer_names=self.layer_names,
             aggregation_fn=aggregate_fn,
             n_collect=num_samples,
+            cache_device=activation_cache_device,
         )
 
         if self.caching:
@@ -591,6 +593,10 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             aggregate_fn=None,
             cache_dir=None,
             model_name=None,
+            activation_cache_device=None,
+            checkpoint_every=5000,
+            checkpoint_neuron_chunk_size=None,
+            checkpoint_dir=None,
     ):
         if adapter is None:
             raise ValueError(
@@ -600,6 +606,21 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
 
         if model_name is not None:
             model.name = model_name
+
+        if checkpoint_every is not None and checkpoint_every <= 0:
+            raise ValueError(
+                "checkpoint_every must be positive or None"
+            )
+
+        self.checkpoint_every = checkpoint_every
+        self.checkpoint_neuron_chunk_size = (
+            checkpoint_neuron_chunk_size
+        )
+        self.checkpoint_dir = (
+            Path(checkpoint_dir)
+            if checkpoint_dir is not None
+            else None
+        )
 
         super().__init__(
             model=model,
@@ -611,6 +632,7 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             adapter=adapter,
             aggregate_fn=aggregate_fn,
             cache_dir=cache_dir,
+            activation_cache_device=activation_cache_device,
         )
 
         self.model_name = self.model.name
@@ -652,16 +674,17 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             batch_size: int = 64,
             num_workers: int = 0,
     ):
-        dataloader = torch.utils.data.DataLoader(
-            self.dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=self.adapter.collate_fn,
+        checkpoint_dir = (
+            self.checkpoint_dir
+            if self.checkpoint_dir is not None
+            else (
+                self.storage_dir / "checkpoints"
+                if self._cache_root is not None
+                else Path("./actmax-checkpoint")
+                / self.dataset.name
+                / self.model.name
+            )
         )
-
-        checkpoint_dir = Path("./actmax-checkpoint")
-        checkpoint_every = 50
 
         checkpoint_files_exist = (
                 checkpoint_dir.is_dir()
@@ -677,12 +700,41 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
             self.actmax_cache.load(
                 checkpoint_dir
             )
+
+            samples_seen = set(
+                self.actmax_cache.sample_idx_counter.values()
+            )
+            if len(samples_seen) != 1:
+                raise ValueError(
+                    "Checkpoint layers disagree about the number of "
+                    f"processed samples: {sorted(samples_seen)}"
+                )
+            start_sample = samples_seen.pop()
         else:
             logger.info(
                 "No ActMax checkpoint found at %s; "
                 "starting from scratch.",
                 checkpoint_dir,
             )
+            start_sample = 0
+
+        if start_sample > len(self.dataset):
+            raise ValueError(
+                f"Checkpoint contains {start_sample} processed samples, "
+                f"but the dataset contains only {len(self.dataset)}."
+            )
+
+        remaining_dataset = torch.utils.data.Subset(
+            self.dataset,
+            range(start_sample, len(self.dataset)),
+        )
+        dataloader = torch.utils.data.DataLoader(
+            remaining_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=self.adapter.collate_fn,
+        )
 
         with self.actmax_cache.hook_context(
                 self.model
@@ -707,16 +759,23 @@ class CustomActivationComponentVisualizer(ActivationComponentVisualizer):
                     prepared_batch,
                 )
 
-                if batch_idx % checkpoint_every == 0:
+                if (
+                    self.checkpoint_every is not None
+                    and (batch_idx + 1) % self.checkpoint_every == 0
+                ):
                     self.actmax_cache.store_checkpoint(
                         checkpoint_dir,
-                        neuron_chunk_size=100,  # or None for one file per layer
+                        neuron_chunk_size=(
+                            self.checkpoint_neuron_chunk_size
+                        ),
                     )
 
         # Always save the final state.
         self.actmax_cache.store_checkpoint(
                     checkpoint_dir,
-                    neuron_chunk_size=100,
+                    neuron_chunk_size=(
+                        self.checkpoint_neuron_chunk_size
+                    ),
                 )
 
         self.actmax_cache.current_batch = None
