@@ -55,7 +55,7 @@ import torch
 import os
 import re
 
-from adapters.semanticlens.base import PreparedBatch
+from interpretability.adapters.semanticlens.base import PreparedBatch
 
 from . import aggregators
 
@@ -353,6 +353,7 @@ class CustomActMax(ActMax):
         n_collect: int,
         n_latents: int | None = None,
         n_all_latents: list | None = None,
+        cache_device: torch.device | str | None = None,
     ):
         # Do not call ActMax.__init__, because it invokes
         # _setup_tensors() using the parent method signature.
@@ -360,6 +361,11 @@ class CustomActMax(ActMax):
         self.n_collect = n_collect
         self.n_latents = n_latents
         self.n_all_latents = n_all_latents
+        self.cache_device = (
+            torch.device(cache_device)
+            if cache_device is not None
+            else None
+        )
 
         self.is_setup = False
         self.activations = None
@@ -449,15 +455,29 @@ class CustomActMax(ActMax):
         spatial_shape = tuple(
             canonical_acts.shape[2:]
         )
-        current_device = canonical_acts.device
+        cache_device = (
+            self.cache_device
+            if self.cache_device is not None
+            else canonical_acts.device
+        )
 
         if not self.is_setup:
             self._setup_tensors(
                 n_latents=n_latents,
                 spatial_shape=spatial_shape,
-                device=current_device,
+                device=cache_device,
             )
         else:
+            # Checkpoints are loaded on CPU. Move them once to the selected
+            # cache device instead of copying the complete cache to and from
+            # the model device for every batch.
+            if self.activations.device != cache_device:
+                self.activations = self.activations.to(cache_device)
+                self.sample_ids = self.sample_ids.to(cache_device)
+                self.activations_not_aggr = (
+                    self.activations_not_aggr.to(cache_device)
+                )
+
             cached_spatial_shape = tuple(
                 self.activations_not_aggr.shape[2:]
             )
@@ -473,7 +493,7 @@ class CustomActMax(ActMax):
             aggregated_acts
             .transpose(0, 1)
             .to(
-                device=current_device,
+                device=cache_device,
                 dtype=self.activations.dtype,
             )
         )
@@ -486,21 +506,21 @@ class CustomActMax(ActMax):
                 *range(2, canonical_acts.ndim),
             )
             .to(
-                device=current_device,
+                device=cache_device,
                 dtype=self.activations_not_aggr.dtype,
             )
         )
 
         batch_sample_ids = (
             sample_ids
-            .to(current_device)
+            .to(cache_device)
             .unsqueeze(0)
             .expand(n_latents, -1)
         )
 
         all_aggregated = torch.cat(
             [
-                self.activations.to(current_device),
+                self.activations,
                 batch_aggregated,
             ],
             dim=1,
@@ -508,7 +528,7 @@ class CustomActMax(ActMax):
 
         all_sample_ids = torch.cat(
             [
-                self.sample_ids.to(current_device),
+                self.sample_ids,
                 batch_sample_ids,
             ],
             dim=1,
@@ -516,9 +536,7 @@ class CustomActMax(ActMax):
 
         all_unaggregated = torch.cat(
             [
-                self.activations_not_aggr.to(
-                    current_device
-                ),
+                self.activations_not_aggr,
                 batch_unaggregated,
             ],
             dim=1,
@@ -545,21 +563,19 @@ class CustomActMax(ActMax):
             .expand(expanded_shape)
         )
 
-        self.activations = (
-            top_activations.detach().cpu()
-        )
+        self.activations = top_activations.detach()
 
         self.sample_ids = torch.gather(
             all_sample_ids,
             dim=1,
             index=indices,
-        ).detach().cpu()
+        ).detach()
 
         self.activations_not_aggr = torch.gather(
             all_unaggregated,
             dim=1,
             index=gather_indices,
-        ).detach().cpu()
+        ).detach()
 
     def store(
         self,
@@ -574,10 +590,17 @@ class CustomActMax(ActMax):
             return
 
         tensors = {
-            "activations": self.activations,
-            "sample_ids": self.sample_ids,
+            "activations": (
+                self.activations.detach().cpu().contiguous()
+            ),
+            "sample_ids": (
+                self.sample_ids.detach().cpu().contiguous()
+            ),
             "not_aggr_activations": (
                 self.activations_not_aggr
+                .detach()
+                .cpu()
+                .contiguous()
             ),
         }
 
@@ -859,6 +882,7 @@ class CustomActMaxCache(ActMaxCache):
         layer_names: list[str],
         aggregation_fn,
         n_collect: int,
+        cache_device: torch.device | str | None = None,
     ):
         if adapter is None:
             raise ValueError(
@@ -873,12 +897,14 @@ class CustomActMaxCache(ActMaxCache):
 
         self.adapter = adapter
         self.model_name = model_name
+        self.cache_device = cache_device
         self.current_batch = None
 
         self.cache: dict[str, CustomActMax] = {
             layer_name: CustomActMax(
                 model_name=model_name,
                 n_collect=n_collect,
+                cache_device=cache_device,
             )
             for layer_name in layer_names
         }
@@ -1082,9 +1108,10 @@ class CustomActMaxCache(ActMaxCache):
                 )
             )
 
-            # Preserve your existing aggregation behavior.
-            aggregated_acts = self.aggregation_fn(
-                output
+            aggregated_acts = self.adapter.aggregate_for_cache(
+                raw_activations=output,
+                canonical_activations=canonical_acts,
+                aggregation_fn=self.aggregation_fn,
             )
 
             batch_size = canonical_acts.shape[0]
@@ -1549,6 +1576,7 @@ class CustomActMaxCache(ActMaxCache):
                 n_collect=self.n_collect,
                 n_latents=expected_n_latents,
                 n_all_latents=expected_n_all_latents,
+                cache_device=self.cache_device,
             )
 
             instance.activations = (
