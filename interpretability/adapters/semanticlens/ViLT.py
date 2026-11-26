@@ -594,6 +594,25 @@ class ViLTAdapter(SemanticLensAdapter):
 
         return canonical
 
+    def aggregate_for_cache(
+        self,
+        raw_activations,
+        canonical_activations,
+        aggregation_fn,
+    ):
+        """Rank neurons using question-conditioned visual tokens only.
+
+        ViLT encoder outputs contain text tokens, an image CLS token, and
+        image-patch tokens. ``canonicalize_activations`` has already selected
+        and spatially restored the valid image patches, so aggregating this
+        representation keeps activation ranking consistent with the heatmaps
+        and crops produced by SemanticLens.
+        """
+
+        return canonical_activations.flatten(
+            start_dim=2
+        ).mean(dim=2)
+
     def create_heatmap(
         self,
         neuron_activation: torch.Tensor,

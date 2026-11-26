@@ -1108,11 +1108,22 @@ class CustomActMaxCache(ActMaxCache):
                 )
             )
 
-            aggregated_acts = self.adapter.aggregate_for_cache(
-                raw_activations=output,
-                canonical_activations=canonical_acts,
-                aggregation_fn=self.aggregation_fn,
+            aggregate_for_cache = getattr(
+                self.adapter,
+                "aggregate_for_cache",
+                None,
             )
+
+            if aggregate_for_cache is None:
+                # Backward compatibility for adapters created before the
+                # canonical-aggregation extension was introduced.
+                aggregated_acts = self.aggregation_fn(output)
+            else:
+                aggregated_acts = aggregate_for_cache(
+                    raw_activations=output,
+                    canonical_activations=canonical_acts,
+                    aggregation_fn=self.aggregation_fn,
+                )
 
             batch_size = canonical_acts.shape[0]
 
