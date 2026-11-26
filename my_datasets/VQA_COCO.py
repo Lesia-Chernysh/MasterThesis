@@ -34,7 +34,12 @@ class ImageFolderImitator():
 
 
 class VQACoco(Dataset):
-    def __init__(self, root="/content/vqa", transform=None):
+    def __init__(
+        self,
+        root="/content/vqa",
+        transform=None,
+        unique_images=False,
+    ):
         self.root = root
         self.transform = transform
         self.image_dir = os.path.join(root, "val2014")
@@ -44,9 +49,47 @@ class VQACoco(Dataset):
         )
 
         with open(questions_path, "r") as f:
-            self.questions = json.load(f)["questions"]
+            self.all_questions = json.load(f)["questions"]
+
+        self.question_indices_by_image = {}
+        for question_index, sample in enumerate(self.all_questions):
+            self.question_indices_by_image.setdefault(
+                sample["image_id"],
+                [],
+            ).append(question_index)
+
+        self.unique_images = unique_images
+        self.name = (
+            "VQACoco_val_unique_images"
+            if unique_images
+            else "VQACoco_val"
+        )
+        if unique_images:
+            self.questions = [
+                self.all_questions[indices[0]]
+                for indices in self.question_indices_by_image.values()
+            ]
+        else:
+            self.questions = self.all_questions
 
         self.dataset = ImageFolderImitator(self.questions, self.image_dir)
+
+    def get_question_indices(self, idx):
+        image_id = self.questions[idx]["image_id"]
+        return list(self.question_indices_by_image[image_id])
+
+    def get_questions(self, idx):
+        return [
+            self.all_questions[question_index]["question"]
+            for question_index in self.get_question_indices(idx)
+        ]
+
+    def get_image_path(self, idx):
+        image_id = self.questions[idx]["image_id"]
+        return os.path.join(
+            self.image_dir,
+            f"COCO_val2014_{image_id:012d}.jpg",
+        )
 
     def __len__(self):
         return len(self.questions)
@@ -57,10 +100,7 @@ class VQACoco(Dataset):
         image_id = sample["image_id"]
         question = sample["question"]
 
-        image_path = os.path.join(
-            self.image_dir,
-            f"COCO_val2014_{image_id:012d}.jpg"
-        )
+        image_path = self.get_image_path(idx)
 
         image = Image.open(image_path).convert("RGB")
 
